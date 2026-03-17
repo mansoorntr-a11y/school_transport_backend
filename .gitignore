@@ -1,0 +1,15 @@
+# Ignore the virtual environment (This is the most important one!)
+venv/
+ENV/
+env/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+
+# Ignore the local database (You don't want to upload your test data)
+*.db
+instance/
+
+# Ignore environment variables / secrets
+.env
