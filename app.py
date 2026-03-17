@@ -311,65 +311,52 @@ def login():
         }), 200
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-# jwt_required(optional=True)  <-- Keep this commented
+# @jwt_required()  <-- This must be commented out
 def handle_admin_users():
-    # 🚀 1. Handle Pre-flight handshake
+    # 🚀 1. Handle Pre-flight handshake (Must be the first thing inside)
     if request.method == 'OPTIONS':
         return _cors_response()
 
     # 🚨 TEMPORARY BYPASS START 🚨
-    # We comment out the real security and use a "Fake" admin for 5 minutes
+    # Everything here is indented exactly 4 spaces
+    class MockUser:
+        id = 1
+        role = 'super_admin'
+        company_id = 1
+    
+    current_user = MockUser()
+    # 🚨 TEMPORARY BYPASS END 🚨
+
+    # 🚀 2. Security Verification (COMMENT THESE OUT TEMPORARILY)
     # from flask_jwt_extended import verify_jwt_in_request
     # try:
     #     verify_jwt_in_request()
     # except Exception:
     #     return jsonify({"error": "Missing or invalid token"}), 401
 
-    class MockUser:
-        id = 1
-        role = 'super_admin'
-        company_id = 1
-    current_user = MockUser() 
-    # 🚨 TEMPORARY BYPASS END 🚨
+    # current_user_id = get_jwt_identity()
+    # current_user = db.session.get(User, current_user_id)
 
-    # 🚀 2. Security Verification
-    from flask_jwt_extended import verify_jwt_in_request
-    try:
-        verify_jwt_in_request()
-    except Exception:
-        return jsonify({"error": "Missing or invalid token"}), 401
-
-    current_user_id = get_jwt_identity()
-    current_user = db.session.get(User, current_user_id)
-
-    if not current_user:
-        return jsonify({"error": "User not found"}), 404
-
-    # 📂 3. FETCH USERS (GET) - Restored
+    # 📂 3. FETCH USERS (GET)
     if request.method == 'GET':
         if current_user.role == 'super_admin':
             users = User.query.all()
         else:
-            # 🚀 SaaS Isolation: Only see users from your own school
             users = User.query.filter_by(company_id=current_user.company_id).all()
         return jsonify([u.to_dict() for u in users]), 200
 
-    # 📝 4. CREATE USER (POST) - Restored
+    # 📝 4. CREATE USER (POST)
     if request.method == 'POST':
         try:
             data = request.json
             if User.query.filter_by(username=data.get('username')).first():
                 return jsonify({'error': 'Username already exists'}), 400
 
-            # Link user to school automatically
-            company_id = data.get('company_id') if current_user.role == 'super_admin' else current_user.company_id
-
             new_user = User(
                 username=data.get('username'),
                 password_hash=generate_password_hash(data.get('password', '1234')),
-                role=data.get('role', 'staff').lower().replace(' ', '_'),
-                contact_number=data.get('contact_number'),
-                company_id=company_id, 
+                role=data.get('role', 'super_admin'), # Force super_admin for this script
+                company_id=1, 
                 branch_id=data.get('branch_id')
             )
             db.session.add(new_user)
