@@ -27,42 +27,42 @@ def get_safe_attr(obj, attr_list, default=0):
 app = Flask(__name__)
 
 # ==========================================
-# 🚀 1. PATH CONFIGURATION
+# 🚀 1. PATH & DATABASE CONFIG
 # ==========================================
 basedir = os.path.abspath(os.path.dirname(__file__))
-# We will put the database in the root folder for maximum compatibility on Render
-db_path = os.path.join(basedir, 'schooltransport.db')
+# We use 'instance' folder as it is a standard writable location
+db_dir = os.path.join(basedir, 'instance')
+os.makedirs(db_dir, exist_ok=True) 
+db_path = os.path.join(db_dir, 'school_transport.db')
 
-# ==========================================
-# 🚀 2. APP CONFIG
-# ==========================================
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+# Use 4 slashes for absolute path on Linux: sqlite:////opt/render/...
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////' + db_path.lstrip('/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'super-secret-key-12345'
 app.config["JWT_SECRET_KEY"] = "school-transport-999-secure-key"
-app.config['UPLOAD_FOLDER'] = os.path.join(basedir, 'static', 'notices')
-
-# Ensure directories exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ==========================================
-# 🚀 3. INITIALIZE PLUGINS (Crucial Order)
+# 🚀 2. INITIALIZE PLUGINS (ONLY ONCE!)
 # ==========================================
-db = SQLAlchemy(app) # 1. Define db first
+db = SQLAlchemy(app)
 jwt = JWTManager(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
 # ==========================================
-# 🚀 4. CREATE DATABASE TABLES
+# 🚀 3. CREATE TABLES & TOUCH FILE
 # ==========================================
-# This MUST happen after 'db = SQLAlchemy(app)'
 with app.app_context():
-    # This creates the .db file if it doesn't exist
-    db.create_all() 
-    print(f"✅ Database initialized at: {db_path}")
+    try:
+        # This creates the .db file inside the 'instance' folder
+        db.create_all()
+        if not os.path.exists(db_path):
+            open(db_path, 'a').close()
+        print(f"✅ DATABASE READY AT: {db_path}")
+    except Exception as e:
+        print(f"❌ DATABASE INIT ERROR: {e}")
 
 # ==========================================
-# 🚀 5. HELPER FUNCTIONS
+# 🚀 4. HELPER FUNCTIONS
 # ==========================================
 def get_safe_attr(obj, attr_list, default=0):
     for attr in attr_list:
