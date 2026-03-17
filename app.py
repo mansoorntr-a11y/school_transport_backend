@@ -311,7 +311,7 @@ def login():
         }), 200
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-@jwt_required(optional=True)
+#jwt_required(optional=True)
 def handle_admin_users():
     # 🚀 1. Handle Pre-flight handshake
     if request.method == 'OPTIONS':
