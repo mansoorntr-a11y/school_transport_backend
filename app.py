@@ -27,23 +27,49 @@ def get_safe_attr(obj, attr_list, default=0):
 app = Flask(__name__)
 
 # ==========================================
-# 🚀 APP CONFIGURATION
+# 🚀 1. PATH CONFIGURATION
 # ==========================================
 basedir = os.path.abspath(os.path.dirname(__file__))
-db_path = os.path.join(basedir, 'instance', 'schooltransport.db')
+# We will put the database in the root folder for maximum compatibility on Render
+db_path = os.path.join(basedir, 'schooltransport.db')
 
+# ==========================================
+# 🚀 2. APP CONFIG
+# ==========================================
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'super-secret-key-12345'
 app.config["JWT_SECRET_KEY"] = "school-transport-999-secure-key"
 app.config['UPLOAD_FOLDER'] = os.path.join(basedir, 'static', 'notices')
 
-# Ensure upload directory exists
+# Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-db = SQLAlchemy(app)
+# ==========================================
+# 🚀 3. INITIALIZE PLUGINS (Crucial Order)
+# ==========================================
+db = SQLAlchemy(app) # 1. Define db first
 jwt = JWTManager(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+
+# ==========================================
+# 🚀 4. CREATE DATABASE TABLES
+# ==========================================
+# This MUST happen after 'db = SQLAlchemy(app)'
+with app.app_context():
+    # This creates the .db file if it doesn't exist
+    db.create_all() 
+    print(f"✅ Database initialized at: {db_path}")
+
+# ==========================================
+# 🚀 5. HELPER FUNCTIONS
+# ==========================================
+def get_safe_attr(obj, attr_list, default=0):
+    for attr in attr_list:
+        if hasattr(obj, attr):
+            val = getattr(obj, attr)
+            return val if val is not None else default
+    return default
 
 # ==========================================
 # 📝 DATABASE MODELS
