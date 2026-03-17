@@ -311,87 +311,33 @@ def login():
         }), 200
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-# @jwt_required()  <-- This must be commented out
+# @jwt_required()  <-- Keep this commented!
 def handle_admin_users():
-    # 🚀 1. Handle Pre-flight handshake (Must be the first thing inside)
     if request.method == 'OPTIONS':
         return _cors_response()
 
-    # 🚨 TEMPORARY BYPASS START 🚨
-    # Everything here is indented exactly 4 spaces
-    class MockUser:
-        id = 1
-        role = 'super_admin'
-        company_id = 1
-    
-    current_user = MockUser()
-    # 🚨 TEMPORARY BYPASS END 🚨
+    # 🚨 TEMPORARY BYPASS: We skip ALL security checks
+    print("🔓 SECURITY BYPASS ACTIVE") 
 
-    # 🚀 2. Security Verification (COMMENT THESE OUT TEMPORARILY)
-    # from flask_jwt_extended import verify_jwt_in_request
-    # try:
-    #     verify_jwt_in_request()
-    # except Exception:
-    #     return jsonify({"error": "Missing or invalid token"}), 401
-
-    # current_user_id = get_jwt_identity()
-    # current_user = db.session.get(User, current_user_id)
-
-    # 📂 3. FETCH USERS (GET)
-    if request.method == 'GET':
-        if current_user.role == 'super_admin':
-            users = User.query.all()
-        else:
-            users = User.query.filter_by(company_id=current_user.company_id).all()
-        return jsonify([u.to_dict() for u in users]), 200
-
-    # 📝 4. CREATE USER (POST)
     if request.method == 'POST':
         try:
             data = request.json
-            if User.query.filter_by(username=data.get('username')).first():
-                return jsonify({'error': 'Username already exists'}), 400
-
+            # Create the user without checking who is asking
             new_user = User(
                 username=data.get('username'),
                 password_hash=generate_password_hash(data.get('password', '1234')),
-                role=data.get('role', 'super_admin'), # Force super_admin for this script
+                role='super_admin',
                 company_id=1, 
                 branch_id=data.get('branch_id')
             )
             db.session.add(new_user)
             db.session.commit()
-            return jsonify({"message": "User created successfully", "id": new_user.id}), 201
+            return jsonify({"message": "User created successfully"}), 201
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": f"Create failed: {str(e)}"}), 500
+            return jsonify({"error": str(e)}), 500
 
-    # 📝 5. EDIT USER (PUT) - With your new logic
-    if request.method == 'PUT':
-        try:
-            data = request.json
-            user_id = data.get('id')
-            target_user = db.session.get(User, user_id)
-
-            if not target_user:
-                return jsonify({"error": "User not found"}), 404
-
-            # Security check for Edit
-            if current_user.role != 'super_admin' and target_user.company_id != current_user.company_id:
-                return jsonify({"error": "Unauthorized"}), 403
-
-            target_user.username = data.get('username', target_user.username)
-            target_user.contact_number = data.get('contact_number', target_user.contact_number)
-            target_user.branch_id = data.get('branch_id', target_user.branch_id)
-            
-            if data.get('password'):
-                target_user.password_hash = generate_password_hash(data.get('password'))
-
-            db.session.commit()
-            return jsonify({"message": "User updated successfully"}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": f"Update failed: {str(e)}"}), 500
+    return jsonify({"message": "Bypass active, use POST to create admin"}), 200
 
 # Helper to get only drivers
 @app.route('/api/admin/drivers', methods=['GET'])
