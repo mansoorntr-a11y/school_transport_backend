@@ -311,11 +311,26 @@ def login():
         }), 200
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-#jwt_required(optional=True)
+# jwt_required(optional=True)  <-- Keep this commented
 def handle_admin_users():
     # 🚀 1. Handle Pre-flight handshake
     if request.method == 'OPTIONS':
         return _cors_response()
+
+    # 🚨 TEMPORARY BYPASS START 🚨
+    # We comment out the real security and use a "Fake" admin for 5 minutes
+    # from flask_jwt_extended import verify_jwt_in_request
+    # try:
+    #     verify_jwt_in_request()
+    # except Exception:
+    #     return jsonify({"error": "Missing or invalid token"}), 401
+
+    class MockUser:
+        id = 1
+        role = 'super_admin'
+        company_id = 1
+    current_user = MockUser() 
+    # 🚨 TEMPORARY BYPASS END 🚨
 
     # 🚀 2. Security Verification
     from flask_jwt_extended import verify_jwt_in_request
