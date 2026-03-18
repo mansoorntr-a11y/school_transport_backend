@@ -65,7 +65,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=False)
+    password_hash = db.Column(db.Text, nullable=False)
     role = db.Column(db.String(20), nullable=False)
     branch_id = db.Column(db.String(50))
     contact_number = db.Column(db.String(20)) 
