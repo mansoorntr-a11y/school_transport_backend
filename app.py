@@ -27,19 +27,18 @@ def get_safe_attr(obj, attr_list, default=0):
 app = Flask(__name__)
 
 # ==========================================
-# 🚀 1. PATH & DATABASE CONFIG
+# 🚀 RENDER-SPECIFIC DATABASE CONFIG
 # ==========================================
 basedir = os.path.abspath(os.path.dirname(__file__))
-# We use 'instance' folder as it is a standard writable location
-db_dir = os.path.join(basedir, 'instance')
-os.makedirs(db_dir, exist_ok=True) 
-db_path = os.path.join(db_dir, 'school_transport.db')
+db_name = "v4_transport.db" 
+db_path = os.path.join(basedir, db_name)
 
-# Use 4 slashes for absolute path on Linux: sqlite:////opt/render/...
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////' + db_path.lstrip('/')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'super-secret-key-12345'
 app.config["JWT_SECRET_KEY"] = "school-transport-999-secure-key"
+
+# ✅ REMOVED THE REDUNDANT 'db = SQLAlchemy(app)' HERE
 
 # ==========================================
 # 🚀 2. INITIALIZE PLUGINS (ONLY ONCE!)
@@ -2461,46 +2460,46 @@ def auto_move_bus():
             
             time.sleep(5) # ⏱️ Wait 5 seconds before next move
 
-# ✅ Start the mover thread BEFORE the app runs
+# ✅ START THE SIMULATOR
 simulation_thread = threading.Thread(target=auto_move_bus, daemon=True)
 simulation_thread.start()
 
-
 # ==========================================
-# 🚀 3. CREATE TABLES & TOUCH FILE
-# ==========================================
-with app.app_context():
-    try:
-        # This creates the .db file inside the 'instance' folder
-        db.create_all()
-        if not os.path.exists(db_path):
-            open(db_path, 'a').close()
-        print(f"✅ DATABASE READY AT: {db_path}")
-    except Exception as e:
-        print(f"❌ DATABASE INIT ERROR: {e}")
-
-# ==========================================
-#   🚀 STARTUP
+# 🚀 STARTUP, TABLE CREATION & SEEDING
 # ==========================================
 if __name__ == "__main__":
     with app.app_context():
-        db.create_all()
-        # Seed Default Super Admin
-        if not User.query.filter_by(username='admin').first():
-            admin_co = Company.query.filter_by(name="Main Office").first()
-            if not admin_co:
-                admin_co = Company(name="Main Office")
-                db.session.add(admin_co)
-                db.session.commit()
+        try:
+            # 1. Create all tables
+            db.create_all()
             
-            admin_user = User(
-                username='admin', 
-                password_hash=generate_password_hash('admin123'),
-                role='super_admin',
-                company_id=admin_co.id
-            )
-            db.session.add(admin_user)
-            db.session.commit()
-            print("🚀 SUPER ADMIN CREATED: admin / admin123")
+            # 2. Check tables for logs
+            import sqlalchemy as sa
+            inspector = sa.inspect(db.engine)
+            tables = inspector.get_table_names()
+            print(f"✅ DATABASE INITIALIZED. Tables found: {tables}")
 
-    app.run(debug=True, host='0.0.0.0', port=5000)
+            # 3. Seed Default Super Admin if missing
+            if not User.query.filter_by(username='admin').first():
+                admin_co = Company.query.filter_by(name="Main Office").first()
+                if not admin_co:
+                    admin_co = Company(name="Main Office")
+                    db.session.add(admin_co)
+                    db.session.commit()
+                
+                admin_user = User(
+                    username='admin', 
+                    password_hash=generate_password_hash('admin123'),
+                    role='super_admin',
+                    company_id=admin_co.id
+                )
+                db.session.add(admin_user)
+                db.session.commit()
+                print("🚀 SEED SUCCESS: Created admin / admin123")
+                
+        except Exception as e:
+            print(f"❌ STARTUP ERROR: {e}")
+
+    # 4. Run App (Render uses PORT 10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
