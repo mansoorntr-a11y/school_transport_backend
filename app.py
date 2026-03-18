@@ -49,19 +49,6 @@ jwt = JWTManager(app)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
 # ==========================================
-# 🚀 3. CREATE TABLES & TOUCH FILE
-# ==========================================
-with app.app_context():
-    try:
-        # This creates the .db file inside the 'instance' folder
-        db.create_all()
-        if not os.path.exists(db_path):
-            open(db_path, 'a').close()
-        print(f"✅ DATABASE READY AT: {db_path}")
-    except Exception as e:
-        print(f"❌ DATABASE INIT ERROR: {e}")
-
-# ==========================================
 # 🚀 4. HELPER FUNCTIONS
 # ==========================================
 def get_safe_attr(obj, attr_list, default=0):
@@ -2477,6 +2464,20 @@ def auto_move_bus():
 # ✅ Start the mover thread BEFORE the app runs
 simulation_thread = threading.Thread(target=auto_move_bus, daemon=True)
 simulation_thread.start()
+
+
+# ==========================================
+# 🚀 3. CREATE TABLES & TOUCH FILE
+# ==========================================
+with app.app_context():
+    try:
+        # This creates the .db file inside the 'instance' folder
+        db.create_all()
+        if not os.path.exists(db_path):
+            open(db_path, 'a').close()
+        print(f"✅ DATABASE READY AT: {db_path}")
+    except Exception as e:
+        print(f"❌ DATABASE INIT ERROR: {e}")
 
 # ==========================================
 #   🚀 STARTUP
