@@ -2463,46 +2463,18 @@ def auto_move_bus():
             
             time.sleep(5) # ⏱️ Wait 5 seconds before next move
 
-# ✅ START THE SIMULATOR
-simulation_thread = threading.Thread(target=auto_move_bus, daemon=True)
-simulation_thread.start()
+# ==========================================
+# 🚀 STARTUP & TABLE CREATION
+# ==========================================
+# This block runs every time Render starts the app
+with app.app_context():
+    try:
+        db.create_all()
+        print("✅ DATABASE INITIALIZED. Tables are ready.")
+    except Exception as e:
+        print(f"❌ DATABASE ERROR: {e}")
 
-# ==========================================
-# 🚀 STARTUP, TABLE CREATION & SEEDING
-# ==========================================
 if __name__ == "__main__":
-    with app.app_context():
-        try:
-            # 1. Create all tables
-            db.create_all()
-            
-            # 2. Check tables for logs
-            import sqlalchemy as sa
-            inspector = sa.inspect(db.engine)
-            tables = inspector.get_table_names()
-            print(f"✅ DATABASE INITIALIZED. Tables found: {tables}")
-
-            # 3. Seed Default Super Admin if missing
-            if not User.query.filter_by(username='admin').first():
-                admin_co = Company.query.filter_by(name="Main Office").first()
-                if not admin_co:
-                    admin_co = Company(name="Main Office")
-                    db.session.add(admin_co)
-                    db.session.commit()
-                
-                admin_user = User(
-                    username='admin', 
-                    password_hash=generate_password_hash('admin123'),
-                    role='super_admin',
-                    company_id=admin_co.id
-                )
-                db.session.add(admin_user)
-                db.session.commit()
-                print("🚀 SEED SUCCESS: Created admin / admin123")
-                
-        except Exception as e:
-            print(f"❌ STARTUP ERROR: {e}")
-
-    # 4. Run App (Render uses PORT 10000)
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Local development settings
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
