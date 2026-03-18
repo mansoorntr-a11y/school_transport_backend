@@ -2478,17 +2478,39 @@ def auto_move_bus():
             time.sleep(5) # ⏱️ Wait 5 seconds before next move
 
 # ==========================================
-# 🚀 STARTUP & TABLE CREATION
+# 🚀 STARTUP, TABLE CREATION & ADMIN SEEDING
 # ==========================================
-# This block runs every time Render starts the app
 with app.app_context():
     try:
+        # 1. Create all tables
         db.create_all()
         print("✅ DATABASE INITIALIZED. Tables are ready.")
+
+        # 2. Automatically seed the Super Admin if the table is empty
+        if not User.query.filter_by(username='admin_mansoor').first():
+            # Create a default company for the admin
+            admin_co = Company.query.filter_by(name="Main Office").first()
+            if not admin_co:
+                admin_co = Company(name="Main Office", upi_id="school@upi")
+                db.session.add(admin_co)
+                db.session.commit()
+            
+            # Create the Super Admin user
+            new_admin = User(
+                username='admin_mansoor',
+                password_hash=generate_password_hash('admin123'),
+                role='super_admin',
+                company_id=admin_co.id
+            )
+            db.session.add(new_admin)
+            db.session.commit()
+            print("🚀 SEED SUCCESS: Created admin_mansoor / admin123")
+        else:
+            print("ℹ️ Admin already exists, skipping seed.")
+
     except Exception as e:
-        print(f"❌ DATABASE ERROR: {e}")
+        print(f"❌ STARTUP ERROR: {e}")
 
 if __name__ == "__main__":
-    # Local development settings
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
