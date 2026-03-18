@@ -326,7 +326,7 @@ def login():
     return jsonify({"error": "Invalid username or password"}), 401
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-@jwt_required()  <-- ADD THE '#' HERE TEMPORARILY
+@jwt_required()  # No space before @, aligned exactly with the line above
 def handle_admin_users():
     if request.method == 'OPTIONS':
         return _cors_response()
