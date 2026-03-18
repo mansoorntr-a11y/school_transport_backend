@@ -323,7 +323,7 @@ def login():
         }), 200
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-# @jwt_required()  <-- Keep this commented!
+@jwt_required()
 def handle_admin_users():
     if request.method == 'OPTIONS':
         return _cors_response()

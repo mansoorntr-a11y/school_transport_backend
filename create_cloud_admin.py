@@ -6,7 +6,7 @@ BASE_URL = "https://school-transport-backend-d0sg.onrender.com"
 # 2. The Admin details you want
 admin_data = {
     "username": "admin_mansoor",
-    "password": "your_password_here",  # Change this to something you'll remember!
+    "password": "admin123",  # Change this to something you'll remember!
     "role": "super_admin",
     "branch": "Main Office"
 }
