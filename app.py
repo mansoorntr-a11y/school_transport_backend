@@ -326,33 +326,46 @@ def login():
     return jsonify({"error": "Invalid username or password"}), 401
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-# @jwt_required()
+@jwt_required() # 🛡️ SECURITY RE-ENABLED
 def handle_admin_users():
     if request.method == 'OPTIONS':
         return _cors_response()
 
-    # 🚨 TEMPORARY BYPASS: We skip ALL security checks
-    print("🔓 SECURITY BYPASS ACTIVE") 
+    # 1. Identify who is making the request
+    current_user_id = get_jwt_identity()
+    admin_user = db.session.get(User, int(current_user_id))
+
+    # 2. Guard: Only let Super Admins or Admins in
+    if not admin_user or admin_user.role.lower() not in ['super_admin', 'admin']:
+        return jsonify({"error": "Unauthorized. Admin access required."}), 403
 
     if request.method == 'POST':
         try:
             data = request.json
-            # Create the user without checking who is asking
+            
+            # Check if username already exists
+            if User.query.filter_by(username=data.get('username')).first():
+                return jsonify({"error": "Username already exists"}), 400
+
             new_user = User(
                 username=data.get('username'),
                 password_hash=generate_password_hash(data.get('password', '1234')),
-                role='super_admin',
-                company_id=1, 
+                role=data.get('role', 'admin'), # Allow choosing role
+                company_id=admin_user.company_id, # Link to the same school
                 branch_id=data.get('branch_id')
             )
+            
             db.session.add(new_user)
             db.session.commit()
-            return jsonify({"message": "User created successfully"}), 201
+            return jsonify({"message": f"User {new_user.username} created successfully"}), 201
+            
         except Exception as e:
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
-    return jsonify({"message": "Bypass active, use POST to create admin"}), 200
+    # GET logic (Fetch all users for this company)
+    users = User.query.filter_by(company_id=admin_user.company_id).all()
+    return jsonify([u.to_dict() for u in users]), 200
 
 # Helper to get only drivers
 @app.route('/api/admin/drivers', methods=['GET'])
@@ -1090,12 +1103,13 @@ def get_stats():
         # 2. Start with a base query for the whole company
         bus_query = Bus.query.filter_by(company_id=cid)
         
+        # 🛡️ SAFE CHECK: Avoid crashing if company is missing
+        company_name = user.company.name.upper() if user.company else "GLOBAL"
+        
         # 3. Apply branch filter ONLY if a specific branch is selected
-        if branch_param and branch_param not in ["ALL BRANCHES", "GLOBAL", user.company.name.upper()]:
+        if branch_param and branch_param not in ["ALL BRANCHES", "GLOBAL", company_name]:
             bus_query = bus_query.filter(Bus.branch == branch_param)
 
-        # 🚀 THE FIX: Move these counts OUTSIDE the "if" block 
-        # This ensures they run even for "All Branches"
         moving = bus_query.filter(func.lower(Bus.status) == 'moving').count()
         stopped = bus_query.filter(func.lower(Bus.status) == 'stopped').count()
         idle = bus_query.filter(func.lower(Bus.status) == 'idle').count()
