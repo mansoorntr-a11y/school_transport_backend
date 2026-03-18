@@ -322,6 +322,9 @@ def login():
             "company_name": company.name if company else "testschool"
         }), 200
 
+    # 🚀 ADD THIS LINE HERE to prevent the 500 crash
+    return jsonify({"error": "Invalid username or password"}), 401
+
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
 @jwt_required()
 def handle_admin_users():
