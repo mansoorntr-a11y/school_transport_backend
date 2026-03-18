@@ -33,7 +33,7 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 db_name = "v4_transport.db" 
 db_path = os.path.join(basedir, db_name)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////' + db_path.lstrip('/')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://school_transport_db_4tsg_user:zGBMMFAlrqWLBThxx1PzRh701q1XkEiQ@dpg-d6t5ahkhg0os73fjcg60-a/school_transport_db_4tsg'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'super-secret-key-12345'
 app.config["JWT_SECRET_KEY"] = "school-transport-999-secure-key"
@@ -575,60 +575,57 @@ def handle_admin_buses():
     if request.method == 'OPTIONS': 
         return _cors_response()
 
-    from flask_jwt_extended import verify_jwt_in_request
+    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
     try:
         verify_jwt_in_request()
     except Exception:
         return jsonify({"error": "Unauthorized"}), 401
         
-    current_user_id = get_jwt_identity()
-    user = db.session.get(User, int(current_user_id))
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # 🔍 1. GET: Fetching the list for your screen
-    if request.method == 'GET':
-        try:
-            # 🧼 Aggressively clean the branch name coming from Flutter
-            target_branch = request.args.get('branch', '').strip()
-            
-            # 🏢 Filter by company first
-            query = Bus.query.filter_by(company_id=user.company_id)
-            
-            if target_branch:
-                # ✅ Use ilike with % to handle any hidden space issues
-                query = query.filter(Bus.branch.ilike(f"%{target_branch}%"))
-                
-            buses = query.all()
-            print(f"📡 FINAL CHECK: Found {len(buses)} buses for '{target_branch}'")
+    user = db.session.get(User, int(get_jwt_identity()))
+    
+    # 🕵️ 1. SUPER ADMIN (Mansoor) - Needs to see everything to manage clients
+    if user.role == 'super_admin' and not user.company_id:
+        if request.method == 'GET':
+            buses = Bus.query.all()
             return jsonify([b.to_dict() for b in buses]), 200
-        except Exception as e:
-            print(f"❌ GET ERROR: {str(e)}")
-            return jsonify({"error": str(e)}), 500
 
-    # ➕ 2. POST: Adding a single bus manually (Fixed logic)
+    # 🔍 2. GET Logic: Restricted by Role
+    if request.method == 'GET':
+        query = Bus.query.filter_by(company_id=user.company_id)
+        
+        # 🛡️ BRANCH INCHARGE RESTRICTION
+        # If they are a standard 'admin', they ONLY see their branch buses on mobile
+        if user.role == 'admin':
+            # Assuming your Bus model has branch_id or we filter by the string name
+            # If your User model has a branch_name, use that:
+            branch_obj = db.session.get(Branch, user.branch_id)
+            if branch_obj:
+                query = query.filter(Bus.branch.ilike(f"%{branch_obj.name}%"))
+
+        # Allow Super Admin/School Admin to still use the filter dropdown
+        target_branch = request.args.get('branch', '').strip()
+        if target_branch and user.role != 'admin':
+            query = query.filter(Bus.branch.ilike(f"%{target_branch}%"))
+            
+        buses = query.all()
+        return jsonify([b.to_dict() for b in buses]), 200
+
+    # ➕ 3. POST Logic: Adding a bus
     if request.method == 'POST':
-        try:
-            data = request.json
-            new_bus = Bus(
-                bus_no=data.get('bus_number'), 
-                company_id=user.company_id, # 🚀 REQUIRED: Link to school
-                chassis_no=data.get('chassis_no'),
-                seater_capacity=data.get('seater_capacity', 30),
-                gps_device_id=data.get('gps_device_id'),
-                sim_no=data.get('sim_no'),             
-                rfid_reader_id=data.get('rfid_reader_id'), 
-                branch=data.get('branch', 'TEST1').upper().strip(),
-                status='stopped'
+        data = request.json
+        # Only School Admins or Super Admins can add buses, not Branch Incharges
+        if user.role == 'admin':
+            return jsonify({"error": "Branch Incharge cannot add buses"}), 403
+            
+        new_bus = Bus(
+            bus_no=data.get('bus_number'), 
+            company_id=user.company_id,
+            branch=data.get('branch', 'MAIN').upper().strip(),
+            status='stopped'
             )
-            db.session.add(new_bus)
-            db.session.commit()
-            print(f"✅ MANUAL ADD: Bus {new_bus.bus_no} saved successfully.")
-            return jsonify(new_bus.to_dict()), 201
-        except Exception as e:
-            db.session.rollback()
-            print(f"❌ POST ERROR: {str(e)}")
-            return jsonify({"error": str(e)}), 500
+        db.session.add(new_bus)
+        db.session.commit()
+        return jsonify(new_bus.to_dict()), 201
 
 @app.route('/api/admin/buses/<int:bus_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @jwt_required()
@@ -1086,46 +1083,45 @@ def get_all_bus_locations():
 
 # 📊 SMART DASHBOARD STATS (Fixed to prevent Crash)
 @app.route('/api/admin/stats', methods=['GET', 'OPTIONS'])
-@jwt_required(optional=True)
+@jwt_required()
 def get_stats():
-    if request.method == 'OPTIONS': return jsonify({'ok': True}), 200
+    user = db.session.get(User, int(get_jwt_identity()))
     
-    try:
-        from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
-        from sqlalchemy import func
-        verify_jwt_in_request()
-        user = db.session.get(User, int(get_jwt_identity()))
-        cid = user.company_id
-        
-        # 1. Get the branch from the request
-        branch_param = request.args.get('branch', '').strip().upper()
-
-        # 2. Start with a base query for the whole company
-        bus_query = Bus.query.filter_by(company_id=cid)
-        
-        # 🛡️ SAFE CHECK: Avoid crashing if company is missing
-        company_name = user.company.name.upper() if user.company else "GLOBAL"
-        
-        # 3. Apply branch filter ONLY if a specific branch is selected
-        if branch_param and branch_param not in ["ALL BRANCHES", "GLOBAL", company_name]:
-            bus_query = bus_query.filter(Bus.branch == branch_param)
-
-        moving = bus_query.filter(func.lower(Bus.status) == 'moving').count()
-        stopped = bus_query.filter(func.lower(Bus.status) == 'stopped').count()
-        idle = bus_query.filter(func.lower(Bus.status) == 'idle').count()
-        total = bus_query.count()
-
+    # 🕵️ SUPER ADMIN (Mansoor) Logic
+    if user.role == 'super_admin' and not user.company_id:
         return jsonify({
-            "moving": moving,
-            "stopped": stopped,
-            "idle": idle,
-            "total": total,
-            "students": Student.query.filter_by(company_id=cid).count()
+            "total_clients": Company.query.count(),
+            "total_buses": Bus.query.count(),
+            "is_super_developer": True
         }), 200
 
-    except Exception as e:
-        print(f"❌ STATS ERROR: {e}")
-        return jsonify({"error": str(e)}), 500
+    # 🏢 SCHOOL ADMIN / BRANCH INCHARGE Logic
+    query = Bus.query.filter_by(company_id=user.company_id)
+    if user.role == 'admin': # Branch Incharge
+        query = query.filter_by(branch_id=user.branch_id)
+    
+    return jsonify({
+        "moving": query.filter_by(status='moving').count(),
+        "stopped": query.filter_by(status='stopped').count(),
+        "idle": query.filter_by(status='idle').count(),
+        "total": query.count(),
+        "students": Student.query.filter_by(company_id=user.company_id).count()
+    }), 200
+
+@app.route('/api/branches', methods=['GET'])
+@jwt_required()
+def fetch_branches():
+    user = db.session.get(User, int(get_jwt_identity()))
+    
+    # 🛡️ ROLE LOGIC
+    if user.role == 'super_admin':
+        # Super Admin sees ALL branches of the school
+        branches = Branch.query.filter_by(company_id=user.company_id).all()
+    else:
+        # Branch Incharge ONLY sees their own branch
+        branches = Branch.query.filter_by(id=user.branch_id).all()
+        
+    return jsonify([{"id": b.id, "name": b.name} for b in branches]), 200
     
 # 🗺️ 2. FIX THE MAP (Previously 500-ing)
 @app.route('/api/admin/fleet_locations', methods=['GET', 'OPTIONS'])
@@ -2456,61 +2452,55 @@ def debug_stops():
 def auto_move_bus():
     # We use app_context so the thread can talk to the database
     with app.app_context():
-        print("🛰️ Simulation Started: Moving Bus KA05AP1124...")
-        while True:
-            try:
-                # Find your specific bus
-                bus = Bus.query.filter_by(bus_no='KA05AP1124').first()
-                if bus:
-                    # 📍 Move the bus randomly around the PSBN School area
-                    bus.last_lat = 13.1187 + random.uniform(-0.005, 0.005)
-                    bus.last_lng = 77.5752 + random.uniform(-0.005, 0.005)
-                    bus.status = 'moving'
-                    bus.speed = random.uniform(20.0, 45.0)
-                    
-                    db.session.commit()
-                    # Optional: print to terminal so you know it's working
-                    # print(f"📡 SIMULATOR: {bus.bus_no} moved to {bus.last_lat}, {bus.last_lng}")
-            except Exception as e:
-                print(f"❌ Simulation Error: {e}")
-                db.session.rollback()
-            
-            time.sleep(5) # ⏱️ Wait 5 seconds before next move
+     try:
+        db.create_all()
+        # 🕵️ Make Mansoor a GLOBAL SUPER ADMIN (No company_id)
+        if not User.query.filter_by(username='admin_mansoor').first():
+            new_admin = User(
+                username='admin_mansoor',
+                password_hash=generate_password_hash('admin123'),
+                role='super_admin',
+                company_id=None  # 🚀 THIS RESTORES THE "ADD CLIENT" BUTTON
+            )
+            db.session.add(new_admin)
+            db.session.commit()
+            print("🚀 SEED SUCCESS: Global Super Admin Created")
+     except Exception as e:
+        print(f"❌ STARTUP ERROR: {e}")
 
 # ==========================================
 # 🚀 STARTUP, TABLE CREATION & ADMIN SEEDING
 # ==========================================
 with app.app_context():
     try:
-        # 1. Create all tables
         db.create_all()
-        print("✅ DATABASE INITIALIZED. Tables are ready.")
-
-        # 2. Automatically seed the Super Admin if the table is empty
-        if not User.query.filter_by(username='admin_mansoor').first():
-            # Create a default company for the admin
-            admin_co = Company.query.filter_by(name="Main Office").first()
-            if not admin_co:
-                admin_co = Company(name="Main Office", upi_id="school@upi")
-                db.session.add(admin_co)
-                db.session.commit()
-            
-            # Create the Super Admin user
-            new_admin = User(
+        
+        # 🕵️ Check if admin exists
+        admin = User.query.filter_by(username='admin_mansoor').first()
+        
+        if admin:
+            # If he exists but has a company, fix him so the buttons return
+            admin.company_id = None 
+            admin.role = 'super_admin'
+        else:
+            # If he doesn't exist, create him as a Global Developer
+            admin = User(
                 username='admin_mansoor',
                 password_hash=generate_password_hash('admin123'),
                 role='super_admin',
-                company_id=admin_co.id
+                company_id=None # 🚀 THIS BRINGS THE BUTTON BACK
             )
-            db.session.add(new_admin)
-            db.session.commit()
-            print("🚀 SEED SUCCESS: Created admin_mansoor / admin123")
-        else:
-            print("ℹ️ Admin already exists, skipping seed.")
-
+            db.session.add(admin)
+            
+        db.session.commit()
+        print("✅ GLOBAL ADMIN READY: 'Add Client' button restored.")
     except Exception as e:
         print(f"❌ STARTUP ERROR: {e}")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Render provides the "PORT" environment variable. 
+    # If it's not there (like on your laptop), we default to 5000.
+    port = int(os.environ.get("PORT", 5000))
+    
+    # Use debug=True only for local testing
+    app.run(host='0.0.0.0', port=port, debug=True)
