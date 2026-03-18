@@ -33,10 +33,14 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 db_name = "v4_transport.db" 
 db_path = os.path.join(basedir, db_name)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://school_transport_db_4tsg_user:zGBMMFAlrqWLBThxx1PzRh701q1XkEiQ@dpg-d6t5ahkhg0os73fjcg60-a/school_transport_db_4tsg'
+# ✅ THE SMART WAY: 
+# It looks for the "DATABASE_URL" you saved in Render's Environment tab.
+# If it can't find it (like on your laptop), it uses local SQLite.
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///v4_transport.db')
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'super-secret-key-12345'
-app.config["JWT_SECRET_KEY"] = "school-transport-999-secure-key"
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-123')
+app.config["JWT_SECRET_KEY"] = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-789')
 
 # ✅ REMOVED THE REDUNDANT 'db = SQLAlchemy(app)' HERE
 
