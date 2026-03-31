@@ -67,14 +67,12 @@ if uri and uri.startswith("postgres://"):
 # 🚀 RENDER-SPECIFIC DATABASE CONFIG
 # ==========================================
 basedir = os.path.abspath(os.path.dirname(__file__))
-
-# 📂 Path pointing specifically to the instance folder where your data is
 db_path = os.path.join(basedir, 'instance', 'v4_transport.db')
 
 # ✅ THE SMART WAY: 
 # If DATABASE_URL is found (on Render), use it.
 # Otherwise, use the absolute path to your repaired local database.
-app.config['SQLALCHEMY_DATABASE_URI'] = uri or 'sqlite:///v4_transport.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = uri or f'sqlite:///{db_path}'
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-123')
@@ -2910,6 +2908,11 @@ def get_version():
 def debug_stops():
     stops = BusStop.query.all()
     return jsonify([{"name": s.stop_name, "branch_in_db": f"'{s.branch}'"} for s in stops])
+
+@app.route('/health')
+def health_check():
+    # This route doesn't use the DB, so it should be lightning fast
+    return {"status": "ok", "cors": "enabled"}, 200
 
 # ==========================================
 # 🚀 LIVE BUS SIMULATION (Add this at the bottom)
