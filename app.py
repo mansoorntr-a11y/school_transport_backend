@@ -61,7 +61,6 @@ def get_safe_attr(obj, attr_list, default=0):
 app = Flask(__name__)
 
 uri = os.environ.get('DATABASE_URL')
-# 🛡️ Safety: SQLAlchemy 1.4+ requires 'postgresql://' instead of 'postgres://'
 if uri and uri.startswith("postgres://"):
     uri = uri.replace("postgres://", "postgresql://", 1)
 # ==========================================
@@ -75,7 +74,7 @@ db_path = os.path.join(basedir, 'instance', 'v4_transport.db')
 # ✅ THE SMART WAY: 
 # If DATABASE_URL is found (on Render), use it.
 # Otherwise, use the absolute path to your repaired local database.
-app.config['SQLALCHEMY_DATABASE_URI'] = uri or f'sqlite:///{db_path}'
+app.config['SQLALCHEMY_DATABASE_URI'] = uri or 'sqlite:///v4_transport.db'
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-123')
