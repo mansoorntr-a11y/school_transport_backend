@@ -1,28 +1,35 @@
-from app import app, db, Bus
+import sqlite3
+import os
 
-with app.app_context():
-    # 1. Target the missing bus specifically
-    # Using 'KA05AP1102' as the bus_no
-    missing_bus = Bus.query.filter_by(bus_no='KA05AP1102').first()
+# 📂 Define the path to your database
+db_path = os.path.join('instance', 'school_transport.db')
+
+if not os.path.exists(db_path):
+    print(f"❌ Error: Could not find database at {db_path}")
+else:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
     
-    if missing_bus:
-        missing_bus.last_lat = 13.1160 
-        missing_bus.last_lng = 77.5790
-        missing_bus.status = 'Stopped'
-        print(f"✅ Fixed KA05AP1102! Coordinates set.")
-    else:
-        print("❌ Could not find KA05AP1102. Check the spelling in your database.")
+    # 🔍 1. Let's find out what your table is actually named
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [t[0] for t in cursor.fetchall()]
+    print(f"📁 Found tables: {tables}")
 
-    # 2. Safety Sweep for ALL buses
-    all_buses = Bus.query.all()
-    fixed_count = 0
-    for b in all_buses:
-        # If coordinates are missing, 0.0, or None
-        if not b.last_lat or b.last_lat == 0.0:
-            b.last_lat = 13.1180
-            b.last_lng = 77.5750
-            b.status = 'Stopped'
-            fixed_count += 1
-            
-    db.session.commit()
-    print(f"🚀 Safety Sweep: Fixed {fixed_count} total buses with empty locations.")
+    # 🚀 2. Identify the correct table (usually 'student' or 'students')
+    target_table = None
+    if 'student' in tables:
+        target_table = 'student'
+    elif 'students' in tables:
+        target_table = 'students'
+
+    if target_table:
+        # 💳 3. Mark your test tags as PAID
+        tags = ('CARD123', 'CARD124', 'CARD125')
+        query = f"UPDATE {target_table} SET payment_status = 'Paid' WHERE rfid_tag IN (?, ?, ?)"
+        cursor.execute(query, tags)
+        conn.commit()
+        print(f"✅ SUCCESS: Updated {cursor.rowcount} students in '{target_table}' table!")
+    else:
+        print("❌ Error: Could not find a 'student' or 'students' table.")
+
+    conn.close()

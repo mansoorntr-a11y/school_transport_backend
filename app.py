@@ -1,4 +1,6 @@
+from sqlalchemy import cast, Float # 👈 MAKE SURE THIS IS AT THE TOP OF app.py
 from flask import Flask, jsonify, request, send_file
+from sqlalchemy import func
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -11,7 +13,39 @@ import time
 import random
 from datetime import datetime
 import openpyxl
+import sqlite3
 import threading
+
+# 🚀 RUN THIS ONCE TO PATCH YOUR DATABASE WITHOUT DELETING IT
+def patch_database():
+    try:
+        # 1. Connect to your existing database file
+        # Check if your file is named 'school_transport.db' or something else
+        conn = sqlite3.connect('school_transport.db') 
+        cursor = conn.cursor()
+        
+        # 2. Add the missing column manually
+        cursor.execute("ALTER TABLE routes ADD COLUMN branch_id INTEGER")
+        
+        conn.commit()
+        conn.close()
+        print("✅ DATABASE PATCHED: branch_id column added to routes table!")
+    except sqlite3.OperationalError:
+        print("ℹ️ Info: branch_id column already exists or table not found.")
+    except Exception as e:
+        print(f"❌ Patch Error: {e}")
+
+# Call it here so it runs when you start the server
+patch_database()
+
+
+def get_safe_id(id_val):
+    if id_val is None or str(id_val).lower() == 'null' or str(id_val).strip() == '':
+        return None
+    try:
+        return int(id_val)
+    except:
+        return None
 
 
 # 1️⃣ MOVE THIS TO THE TOP (Below your imports)
@@ -26,21 +60,30 @@ def get_safe_attr(obj, attr_list, default=0):
 
 app = Flask(__name__)
 
+uri = os.environ.get('DATABASE_URL')
+# 🛡️ Safety: SQLAlchemy 1.4+ requires 'postgresql://' instead of 'postgres://'
+if uri and uri.startswith("postgres://"):
+    uri = uri.replace("postgres://", "postgresql://", 1)
 # ==========================================
 # 🚀 RENDER-SPECIFIC DATABASE CONFIG
 # ==========================================
 basedir = os.path.abspath(os.path.dirname(__file__))
-db_name = "v4_transport.db" 
-db_path = os.path.join(basedir, db_name)
+
+# 📂 Path pointing specifically to the instance folder where your data is
+db_path = os.path.join(basedir, 'instance', 'v4_transport.db')
 
 # ✅ THE SMART WAY: 
-# It looks for the "DATABASE_URL" you saved in Render's Environment tab.
-# If it can't find it (like on your laptop), it uses local SQLite.
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///v4_transport.db')
+# If DATABASE_URL is found (on Render), use it.
+# Otherwise, use the absolute path to your repaired local database.
+app.config['SQLALCHEMY_DATABASE_URI'] = uri or f'sqlite:///{db_path}'
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-123')
-app.config["JWT_SECRET_KEY"] = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-789')
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY') # 👈 Use the live key
+
+# 🚀 ADD THESE TWO LINES TO ALLOW EXCEL DOWNLOADS:
+app.config["JWT_TOKEN_LOCATION"] = ["headers", "query_string"]
+app.config["JWT_QUERY_STRING_NAME"] = "token"
 
 # ✅ REMOVED THE REDUNDANT 'db = SQLAlchemy(app)' HERE
 
@@ -49,7 +92,12 @@ app.config["JWT_SECRET_KEY"] = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-789')
 # ==========================================
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, resources={r"/api/*": {
+    "origins": [
+        "https://fleettrackpro-7017f.web.app", 
+        "https://fleettrackpro-7017f.firebaseapp.com"
+    ]
+}})
 
 # ==========================================
 # 🚀 4. HELPER FUNCTIONS
@@ -68,24 +116,35 @@ class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
+    
+    # 🚀 THE CRITICAL ADDITION:
+    name = db.Column(db.String(100)) # This is for "Shilpa", "Maria", etc.
+    
+    username = db.Column(db.String(80), unique=True, nullable=False) # This is the Phone/Login ID
     password_hash = db.Column(db.Text, nullable=False)
-    role = db.Column(db.String(20), nullable=False)
-    branch_id = db.Column(db.String(50))
+    role = db.Column(db.String(20), nullable=False) 
+    branch_id = db.Column(db.String(50)) 
     contact_number = db.Column(db.String(20)) 
     license_info = db.Column(db.String(50))
 
+    company = db.relationship('Company', backref='users')
+
     def to_dict(self):
-      return {
-        "id": self.id,
-        "username": self.username,
-        "role": self.role.upper(),
-        # 🛡️ Ensure it looks for the branch name if company name is generic
-        "company_name": self.company.name if self.company else "Unknown School",
-        "branch_id": self.branch_id, # 🚀 Add this to help Flutter
-        "contact_number": self.contact_number,
-        "company_id": self.company_id
-    }
+        return {
+            "id": self.id,
+            "username": self.username,
+            "role": self.role.upper(),
+            "company_name": self.company.name if self.company else "Unknown School",
+            "branch_id": self.branch_id,
+            "company_id": self.company_id,
+            
+            # 🚀 ADD THE NAME HERE FOR FLUTTER:
+            "name": self.name or self.username, # Fallback to username if name is empty
+            
+            "phone": self.contact_number or "", 
+            "contact_number": self.contact_number or "",
+            "license_info": self.license_info or "No ID Entered"
+        }
 
 class Company(db.Model):
     __tablename__ = 'companies'
@@ -97,14 +156,15 @@ class Company(db.Model):
     bank_name = db.Column(db.String(100))
     account_no = db.Column(db.String(50))
     ifsc_code = db.Column(db.String(20))
-    upi_id = db.Column(db.String(100)) # ✅ Add this: e.g., "school@upi"
-    users = db.relationship('User', backref='company', lazy=True)
+    upi_id = db.Column(db.String(100)) 
+
+    # 🛑 REMOVED the 'users = db.relationship' line from here!
 
     def to_dict(self):
         return {
             "id": self.id,
             "company_name": self.name,
-            "upi_id": self.upi_id, # ✅ Ensure this is sent to Flutter
+            "upi_id": self.upi_id,
             "company_logo": self.logo_url,
             "address": self.address,
             "phone": self.phone_number,
@@ -126,8 +186,12 @@ class Branch(db.Model):
 
     def to_dict(self):
         return {
-            "id": self.id, "name": self.name, "location": self.location,
-            "latitude": self.latitude, "longitude": self.longitude
+            "id": self.id, 
+            "branch_name": self.name,  # 🚀 ADD THIS: Flutter screens expect this!
+            "name": self.name,         # Keep this for the Map/Other logic
+            "location": self.location or "No address set",
+            "latitude": self.latitude, 
+            "longitude": self.longitude
         }
 
 class Bus(db.Model):
@@ -136,49 +200,80 @@ class Bus(db.Model):
     bus_no = db.Column(db.String(50), nullable=False) 
     company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
     chassis_no = db.Column(db.String(50))
-    seater_capacity = db.Column(db.Integer)
+    seater_capacity = db.Column(db.Integer, default=30)
     gps_device_id = db.Column(db.String(50))
-    sim_no = db.Column(db.String(20)) # 👈 Ensure this matches your bulk upload
-    rfid_reader_id = db.Column(db.String(50)) # 👈 Ensure this matches your bulk upload
-    branch = db.Column(db.String(50))
+    sim_no = db.Column(db.String(20))
+    rfid_reader_id = db.Column(db.String(50))
+    branch = db.Column(db.String(50)) # Matches the User.branch_id
     status = db.Column(db.String(20), default='stopped') 
     last_lat = db.Column(db.Float)
     last_lng = db.Column(db.Float)
+    morning_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    noon_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    evening_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
     speed = db.Column(db.Float, default=0.0)
+    
+    # 🛣️ Route Connection
+    route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    route = db.relationship('Route', backref='buses_assigned', foreign_keys=[route_id])
+    
+    # 👩‍🏫 Attender Connection
+    attender_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    attender = db.relationship('User', foreign_keys=[attender_id])
+    morning_route = db.relationship('Route', foreign_keys=[morning_route_id])
+    noon_route = db.relationship('Route', foreign_keys=[noon_route_id])
+    evening_route = db.relationship('Route', foreign_keys=[evening_route_id])
 
     def to_dict(self):
         return {
             "id": self.id,
             "bus_number": self.bus_no,
-            "chassis_no": self.chassis_no,
-            "seater_capacity": self.seater_capacity,
-            "gps_device_id": self.gps_device_id,
-            "sim_no": self.sim_no,
-            "rfid_reader_id": self.rfid_reader_id,
+            "chassis_no": self.chassis_no or "N/A",
+            "seater_capacity": self.seater_capacity or 0,
+            "gps_device_id": self.gps_device_id or "N/A",
+            "sim_no": self.sim_no or "N/A",
+            "rfid": self.rfid_reader_id or "N/A", 
             "branch": self.branch,
+            "morning_route_name": self.morning_route.route_name if self.morning_route else "Not Assigned",
+            "noon_route_name": self.noon_route.route_name if self.noon_route else "Not Assigned",
+            "evening_route_name": self.evening_route.route_name if self.evening_route else "Not Assigned",
+            "morning_route_id": self.morning_route_id,
+            "noon_route_id": self.noon_route_id,
+            "evening_route_id": self.evening_route_id,
             "status": self.status,
             "last_lat": self.last_lat,
             "last_lng": self.last_lng,
-            "speed": self.speed
+            "speed": self.speed,
+            "route_id": self.route_id,
+            "attender_id": self.attender_id,
+            "route_name": self.route.route_name if self.route else "Not Assigned",
+            "attender_name": self.attender.username if self.attender else "Not Assigned"
         }
 
-class BusStop(db.Model):
+class Stop(db.Model): # 🚀 Changed name to 'Stop' to match the Controller
     __tablename__ = 'stops'
     id = db.Column(db.Integer, primary_key=True)
     company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
     stop_name = db.Column(db.String(100), nullable=False)
     zone = db.Column(db.String(100), default="General") 
-    km = db.Column(db.Float, nullable=False)
-    latitude = db.Column(db.Float)
-    longitude = db.Column(db.Float)
+    km = db.Column(db.Float, nullable=False, default=0.0)
+    latitude = db.Column(db.Float, default=0.0)
+    longitude = db.Column(db.Float, default=0.0)
     branch = db.Column(db.String(50))
-    # 🔗 ADD THIS: Link to FeeZone for auto-calculation
+    # 🔗 Links to FeeZone for auto-calculation
     fee_zone_id = db.Column(db.Integer, db.ForeignKey('fee_zones.id'), nullable=True)
 
     def to_dict(self):
         return {
-            'id': self.id, 'stop_name': self.stop_name, 'zone': self.zone,
-            'km': self.km, 'latitude': self.latitude, 'longitude': self.longitude, 'branch': self.branch
+            'id': self.id, 
+            'stop_name': self.stop_name, 
+            'zone': self.zone,
+            'km': self.km, 
+            'latitude': self.latitude, 
+            'longitude': self.longitude, 
+            'branch': self.branch,
+            'company_id': self.company_id, # ✅ Added for SaaS debugging
+            'fee_zone_id': self.fee_zone_id
         }
 
 class Student(db.Model):
@@ -199,12 +294,25 @@ class Student(db.Model):
     total_fee = db.Column(db.Float, default=0.0)
     payment_status = db.Column(db.String(20), default="Pending")
     last_status = db.Column(db.String(50))
+    route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    # 🛣️ MULTI-SHIFT STUDENT ROUTES
+    morning_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    noon_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+    evening_route_id = db.Column(db.Integer, db.ForeignKey('routes.id'))
+
+    # Relationships
+    morning_route = db.relationship('Route', foreign_keys=[morning_route_id])
+    noon_route = db.relationship('Route', foreign_keys=[noon_route_id])
+    evening_route = db.relationship('Route', foreign_keys=[evening_route_id])
 
     def to_dict(self):
         return {
             "id": self.id,
             "student_name": self.name,
             "admission_no": self.admission_no,
+            "morning_route_name": self.morning_route.route_name if self.morning_route else "Not Assigned",
+            "noon_route_name": self.noon_route.route_name if self.noon_route else "Not Assigned",
+            "evening_route_name": self.evening_route.route_name if self.evening_route else "Not Assigned",
             "grade": self.grade or "",
             "division": self.division or "", # ✅ ADD THIS LINE
             "parent_mobile": self.parent_mobile or "",
@@ -240,6 +348,7 @@ class AttendanceLog(db.Model):
     branch = db.Column(db.String(50))
     timestamp = db.Column(db.String(50))
     bus_number = db.Column(db.String(50)) # Add if missing
+    company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
 
     # 🔗 This link allows us to get the name without a separate column
     student = db.relationship('Student', backref='logs')
@@ -249,6 +358,7 @@ class AttendanceLog(db.Model):
             "id": self.id,
             "student_id": self.student_id,
             "student_name": self.student.name if self.student else "Unknown", # ✅ Gets name from relationship
+            "company_id": self.company_id,
             "status": self.status,
             "branch": self.branch,
             "timestamp": self.timestamp,
@@ -302,60 +412,124 @@ class BusHistory(db.Model):
     # Relationship to easily find the bus
     bus = db.relationship('Bus', backref=db.backref('history', lazy=True))
 
+def calculate_student_fee(stop_name, company_id):
+    """
+    Finds the correct fee based on a stop name and the school's fee zones.
+    """
+    # 1. Find the stop to get the distance (KM)
+    stop = Stop.query.filter_by(name=stop_name, company_id=company_id).first()
+    
+    if not stop:
+        print(f"⚠️ Stop '{stop_name}' not found. Defaulting fee to 0.")
+        return 0.0
+
+    distance = stop.distance or 0.0
+
+    # 2. Find which FeeZone this distance falls into
+    # We look for: min_km <= distance <= max_km
+    zone = FeeZone.query.filter(
+        FeeZone.company_id == company_id,
+        FeeZone.min_km <= distance,
+        FeeZone.max_km >= distance
+    ).first()
+
+    if zone:
+        print(f"✅ Match: Stop {stop_name} ({distance}km) -> {zone.zone_name} @ ₹{zone.price}")
+        return zone.price
+    
+    print(f"⚠️ No fee zone covers {distance}km. Defaulting fee to 0.")
+    return 0.0
+
+class Route(db.Model):
+    __tablename__ = 'routes'
+    id = db.Column(db.Integer, primary_key=True)
+    route_name = db.Column(db.String(100), nullable=False)
+    shift = db.Column(db.String(20)) 
+    company_id = db.Column(db.Integer, db.ForeignKey('companies.id'), nullable=True)
+    
+    # 🚀 ADD THIS LINE NOW:
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True) 
+    
+    stop_ids = db.Column(db.Text, nullable=True) 
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'route_name': self.route_name,
+            "shift": self.shift or "General",
+            "display_name": f"{self.route_name} ({self.shift or 'General'})",
+            'company_id': self.company_id,
+            'branch_id': self.branch_id, # 👈 Add this here too
+            'stop_ids': self.stop_ids
+        }
+
 # ==========================================
-# 🔐 AUTH & USER MGMT
+# 🔐 AUTH & USER MGMT (Fixed for SaaS ID)
 # ==========================================
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
     user = User.query.filter_by(username=data.get('username')).first()
+    
     if user and check_password_hash(user.password_hash, data.get('password')):
-        # 🔍 Fetch the actual Branch name
-        branch_name = "testone" # Default
+        # 🔍 1. Fetch Branch Name Safely
+        branch_name = "testone" 
         if user.branch_id:
             branch_obj = db.session.get(Branch, user.branch_id)
             if branch_obj:
                 branch_name = branch_obj.name
         
-        company = db.session.get(Company, user.company_id)
+        # 🛡️ 2. Fetch Company Name Safely
+        company_name = "Super Admin Control"
+        if user.company_id:
+            company = db.session.get(Company, user.company_id)
+            if company:
+                company_name = company.name
         
+        # 🚀 3. THE MASTER FIX: Include IDs in the response
         return jsonify({
             "access_token": create_access_token(identity=str(user.id)),
+            "user_id": user.id,             # ✨ ADD THIS LINE!
             "role": user.role,
-            "branch": branch_name,  # ✅ Now sends "testone" instead of "1"
-            "company_name": company.name if company else "testschool"
+            "branch": branch_name,          
+            "branch_id": user.branch_id,    
+            "company_name": company_name,
+            "company_id": user.company_id   
         }), 200
 
-    # 🚀 ADD THIS LINE HERE to prevent the 500 crash
     return jsonify({"error": "Invalid username or password"}), 401
 
 @app.route('/api/admin/users', methods=['GET', 'POST', 'PUT', 'OPTIONS'])
-@jwt_required() # 🛡️ SECURITY RE-ENABLED
+@jwt_required()
 def handle_admin_users():
     if request.method == 'OPTIONS':
         return _cors_response()
 
-    # 1. Identify who is making the request
     current_user_id = get_jwt_identity()
     admin_user = db.session.get(User, int(current_user_id))
 
-    # 2. Guard: Only let Super Admins or Admins in
     if not admin_user or admin_user.role.lower() not in ['super_admin', 'admin']:
-        return jsonify({"error": "Unauthorized. Admin access required."}), 403
+        return jsonify({"error": "Unauthorized"}), 403
 
     if request.method == 'POST':
         try:
             data = request.json
-            
-            # Check if username already exists
             if User.query.filter_by(username=data.get('username')).first():
                 return jsonify({"error": "Username already exists"}), 400
+
+            # 🚀 THE FIX: Determine which company this user belongs to
+            # If Mansoor (super_admin) is creating, take company_id from the JSON data
+            # If a School Admin is creating, force it to THEIR company_id
+            if admin_user.role == 'super_admin':
+                target_company_id = data.get('company_id') 
+            else:
+                target_company_id = admin_user.company_id
 
             new_user = User(
                 username=data.get('username'),
                 password_hash=generate_password_hash(data.get('password', '1234')),
-                role=data.get('role', 'admin'), # Allow choosing role
-                company_id=admin_user.company_id, # Link to the same school
+                role=data.get('role', 'admin'),
+                company_id=target_company_id, # 🛡️ Now correctly assigned!
                 branch_id=data.get('branch_id')
             )
             
@@ -367,523 +541,514 @@ def handle_admin_users():
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
-    # GET logic (Fetch all users for this company)
-    users = User.query.filter_by(company_id=admin_user.company_id).all()
+    # 📂 GET Logic: Isolation Check
+    if admin_user.role == 'super_admin':
+        # Super Admin sees EVERYONE in the system
+        users = User.query.all()
+    else:
+        # School Admin ONLY sees users from their school
+        users = User.query.filter_by(company_id=admin_user.company_id).all()
+        
     return jsonify([u.to_dict() for u in users]), 200
 
-# Helper to get only drivers
-@app.route('/api/admin/drivers', methods=['GET'])
-@jwt_required() # 🛡️ Add security
-def get_drivers():
-    user = db.session.get(User, get_jwt_identity())
-    
-    # 🚀 Filter by company_id so schools don't see each other's drivers
-    if user.role == 'super_admin':
-        drivers = User.query.filter_by(role='driver').all()
-    else:
-        drivers = User.query.filter_by(role='driver', company_id=user.company_id).all()
-    
-    return jsonify([{
-        'id': d.id, 
-        'username': d.username, 
-        'contact_number': d.contact_number, 
-        'license_info': d.license_info,
-        'branch_id': d.branch_id 
-    } for d in drivers]), 200
 
-@app.route('/api/admin/students', methods=['GET', 'OPTIONS'])
-@jwt_required(optional=True) # 🚀 Allow preflight handshake
-def admin_get_students():
+@app.route('/api/admin/users/<int:user_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required()
+def delete_admin_user(user_id):
     if request.method == 'OPTIONS':
-        return jsonify({'message': 'CORS OK'}), 200
+        return _cors_response()
 
-    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
-    try:
-        verify_jwt_in_request()
-    except Exception:
-        return jsonify({"error": "Missing or invalid token"}), 401
+    current_user = db.session.get(User, int(get_jwt_identity()))
+    
+    # 1. Find the target user
+    target_user = db.session.get(User, user_id)
+    if not target_user:
+        return jsonify({"error": "User not found"}), 404
 
-    user = db.session.get(User, int(get_jwt_identity()))
-    branch_param = request.args.get('branch')
+    # 🛡️ 2. SAFETY LOCKS
+    # A. Don't let someone delete themselves
+    if current_user.id == target_user.id:
+        return jsonify({"error": "You cannot delete your own account!"}), 400
 
-    # 🔒 Multi-tenant security
-    query = Student.query.filter_by(company_id=user.company_id)
-
-    # 🛡️ Admin vs Incharge Logic
-    user_role = str(user.role).lower().strip()
-    if user_role in ['super_admin', 'admin']:
-        if branch_param and branch_param not in ["All Branches", "Global", "TEST SCHOOL"]:
-            query = query.filter_by(branch=branch_param.upper())
+    # B. Permission Check
+    if current_user.role == 'super_admin':
+        # Super Admin can delete anyone
+        pass 
+    elif current_user.role == 'admin' and current_user.company_id == target_user.company_id:
+        # School Admin can only delete users in their own school
+        pass
     else:
-        # Branch Incharge Logic
-        BranchModel = globals().get('Branch')
-        if BranchModel:
-            b_obj = db.session.get(BranchModel, user.branch_id)
-            if b_obj:
-                query = query.filter_by(branch=b_obj.name.upper())
+        return jsonify({"error": "Unauthorized to delete this user"}), 403
 
-    students = query.all()
-    return jsonify([s.to_dict() for s in students]), 200
-
-@app.route('/api/admin/students/<int:id>', methods=['PUT', 'DELETE', 'POST', 'OPTIONS'])
-def update_delete_student(id):
-    if request.method == 'OPTIONS':
-        return jsonify({'message': 'OK'}), 200
-
-    student = Student.query.get(id)
-    if not student: 
-        return jsonify({'error': 'Student not found'}), 404
-
-    if request.method == 'DELETE':
-        db.session.delete(student)
-        db.session.commit()
-        return jsonify({'message': 'Student deleted'}), 200
-
-    # ✏️ UPDATE LOGIC (Matches your Flutter "Edit Student" screen)
-    data = request.json
     try:
-        # Standard Info
-        if 'student_name' in data: student.name = data['student_name']
-        if 'grade' in data: student.grade = data['grade']
-        if 'parent_mobile' in data: student.parent_mobile = data['parent_mobile']
-        
-        # ✅ KEY OPERATIONAL FIELDS (Fixes the "null" and "not assigned" issues)
-        if 'rfid_tag' in data: student.rfid_tag = data['rfid_tag']
-        if 'bus_id' in data: student.bus_id = data['bus_id']
-        
-        # ✅ FINANCIAL FIELDS (Saves the ₹27500 value permanently)
-        if 'calculated_fee' in data: 
-            student.total_fee = float(data['calculated_fee'])
-        
-        # Stop Assignment
-        if 'pickup_stop_id' in data: student.pickup_stop_id = data['pickup_stop_id']
-        if 'drop_stop_id' in data: student.drop_stop_id = data['drop_stop_id']
-
+        db.session.delete(target_user)
         db.session.commit()
-        print(f"✅ UPDATED STUDENT: {student.name} | Bus: {student.bus_id} | Fee: {student.total_fee}")
-        return jsonify({'message': 'Student updated successfully'}), 200
+        print(f"🗑️ User {target_user.username} deleted by {current_user.username}")
+        return jsonify({"message": "User deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
-        print(f"❌ UPDATE ERROR: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
+        return jsonify({"error": str(e)}), 500    
 
 # ==========================================
-# 🎓 STUDENTS ROUTE (Unified & Branch-Aware)
+# 🎓 FIXED STUDENT CONTROLLER
 # ==========================================
 @app.route('/api/students', methods=['GET', 'POST', 'OPTIONS'])
-def handle_students():
-    # 🚀 1. Handle Handshake
-    if request.method == 'OPTIONS': 
-        return _cors_response()
-
-    # 🚀 2. Manual Token Verification (More stable than the decorator)
-    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
-    try:
-        verify_jwt_in_request()
-    except Exception as e:
-        return jsonify({"error": "Token invalid or missing"}), 401
-
-    # 🚀 3. Identity Check
-    user_id = get_jwt_identity()
-    user = db.session.get(User, int(user_id))
-    
-    if not user:
-        return jsonify({"error": "User not found"}), 401
-
-    if request.method == 'GET':
-        query = Student.query.filter_by(company_id=user.company_id)
-        branch = request.args.get('branch')
-        if branch: query = query.filter_by(branch=branch.upper())
-        return jsonify([s.to_dict() for s in query.all()]), 200
-
-    if request.method == 'POST':
-        try:
-            data = request.json
-            new_student = Student(
-                name=data.get('student_name'),
-                admission_no=data.get('admission_no'),
-                company_id=user.company_id,
-                branch=data.get('branch', 'PSBN').upper(),
-                grade=data.get('grade'),
-                parent_mobile=data.get('parent_mobile'),
-                bus_id=data.get('bus_id'),
-                pickup_stop_id=data.get('pickup_stop_id'),
-                drop_stop_id=data.get('drop_stop_id'),
-                total_fee=float(data.get('total_fee', 0)),
-                rfid_tag=data.get('rfid_tag'),
-                payment_status=data.get('payment_status', 'Pending')
-            )
-            db.session.add(new_student)
-            db.session.commit()
-            return jsonify(new_student.to_dict()), 201
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
-
-# 🔍 UNIFIED SINGLE STUDENT HANDLER (Handles GET, PUT, DELETE)
 @app.route('/api/students/<int:id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
 @jwt_required()
-def handle_single_student(id):
-    # 🚀 1. Always handle CORS handshake first
-    if request.method == 'OPTIONS': 
-        return _cors_response()
+def handle_students_master(id=None):
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
+
+    user = db.session.get(User, int(get_jwt_identity()))
     
-    # 🚀 2. Identify the logged-in Admin
-    user = db.session.get(User, get_jwt_identity())
-    
-    # 🚀 3. Security Guard: Find student ONLY within the Admin's school
-    # This single query handles both existence and security
-    student = Student.query.filter_by(id=id, company_id=user.company_id).first()
+    # 🛡️ SaaS Safety: If company_id is 'null' in URL, use the user's ID from JWT
+    raw_cid = request.args.get('company_id')
+    final_cid = int(raw_cid) if (raw_cid and raw_cid.isdigit()) else user.company_id
 
-    # Special case for Fleet View (Dummy ID 0)
-    if id == 0:
-        return jsonify({'id': 0, 'student_name': 'Fleet View', 'stop_lat': None, 'stop_lng': None}), 200
-
-    if not student: 
-        return jsonify({'error': 'Access Denied or Student not found'}), 404
-
-    # 📂 1️⃣ GET: Fetch details
     if request.method == 'GET':
+        from sqlalchemy import func
+        user = db.session.get(User, int(get_jwt_identity()))
+        
+        query = Student.query.filter_by(company_id=final_cid)
+
+        # 🛡️ SaaS Security: Non-SuperAdmins are LOCKED to their own company
+        if user.role.lower() != 'super_admin':
+            final_cid = user.company_id
+        else:
+            raw_cid = request.args.get('company_id')
+            final_cid = int(raw_cid) if (raw_cid and raw_cid.isdigit()) else user.company_id
+
+        query = Student.query.filter_by(company_id=final_cid)
+
+        # 🔒 CASE A: Branch Incharge
+        print(f"🕵️ DEBUG: Searching for Company ID: {final_cid}")
+        all_students_in_co = Student.query.filter_by(company_id=final_cid).all()
+        print(f"🕵️ DEBUG: Total students in this company (any branch): {len(all_students_in_co)}")
+        for s in all_students_in_co[:3]: # Print first 3 to check their branch strings
+            print(f"   -> Student: {s.name} | Branch in DB: '{s.branch}'")
+
+        if user.role.lower() == 'branch_incharge':
+            branch_obj = db.session.get(Branch, user.branch_id)
+            if branch_obj:
+                search_name = branch_obj.name.strip().upper()
+                print(f"🕵️ DEBUG: Incharge is searching for branch: '{search_name}'")
+                query = query.filter(func.trim(func.upper(Student.branch)) == search_name)
+            else:
+                return jsonify([]), 200
+        
+        # 🔓 CASE B: Admin Filtering
+        else:
+            target_branch = request.args.get('branch', '').strip().upper()
+            if target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
+                query = query.filter(func.trim(func.upper(Student.branch)) == target_branch)
+
+        students = query.order_by(Student.name.asc()).all()
+        return jsonify([s.to_dict() for s in students]), 200
+
+    branch_obj = db.session.get(Branch, user.branch_id)
+    if branch_obj:
+        # 🚀 THE BULLETPROOF FILTER
+        assigned_branch_name = branch_obj.name.strip().upper()
+        query = query.filter(func.upper(Student.branch) == assigned_branch_name)
+        print(f"🔍 Security: User {user.username} limited to students in {assigned_branch_name}")
+    else:
+        print(f"⚠️ Branch ID {user.branch_id} not found in Branch table!")
+        return jsonify([]), 200
+
+    # ➕ 2. ADD STUDENT (POST)
+    if request.method == 'POST':
+        data = request.json
+        raw_cid = data.get('company_id')
+        
+        # Determining company ownership
+        final_company_id = int(raw_cid) if (user.role == 'super_admin' and raw_cid) else user.company_id
+        
+        if not final_company_id:
+            return jsonify({"error": "No company_id specified"}), 400
+
+        new_student = Student(
+            name=data.get('student_name'),
+            admission_no=data.get('admission_no'),
+            company_id=final_company_id,
+            branch=data.get('branch', 'MAIN').upper(),
+            grade=data.get('grade'),
+            division=data.get('division'),
+            parent_mobile=data.get('parent_mobile'),
+            bus_id=data.get('bus_id'),
+            pickup_stop_id=data.get('pickup_stop_id'),
+            drop_stop_id=data.get('drop_stop_id'),
+            total_fee=float(data.get('total_fee', 0)),
+            rfid_tag=data.get('rfid_tag'),
+            payment_status=data.get('payment_status', 'Pending'),
+            # 🚀 MULTI-SHIFT ROUTES CAPTURED HERE:
+            morning_route_id=data.get('morning_route_id'),
+            noon_route_id=data.get('noon_route_id'),
+            evening_route_id=data.get('evening_route_id')
+        )
+        db.session.add(new_student)
+        db.session.commit()
+        return jsonify(new_student.to_dict()), 201
+
+    # 📝 3. UPDATE STUDENT (PUT)
+    if request.method == 'PUT':
+        student = db.session.get(Student, id)
+        if not student: return jsonify({'error': 'Not found'}), 404
+        
+        if user.role != 'super_admin' and student.company_id != user.company_id:
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        data = request.json
+        student.name = data.get('student_name', student.name)
+        student.admission_no = data.get('admission_no', student.admission_no)
+        student.grade = data.get('grade', student.grade)
+        student.division = data.get('division', student.division)
+        student.parent_mobile = data.get('parent_mobile', student.parent_mobile)
+        student.branch = data.get('branch', student.branch).upper()
+        student.rfid_tag = data.get('rfid_tag', student.rfid_tag)
+        student.bus_id = data.get('bus_id', student.bus_id)
+        student.pickup_stop_id = data.get('pickup_stop_id', student.pickup_stop_id)
+        student.drop_stop_id = data.get('drop_stop_id', student.drop_stop_id)
+        student.total_fee = float(data.get('total_fee', student.total_fee))
+        student.payment_status = data.get('payment_status', student.payment_status)
+        
+        # 🚀 UPDATE MULTI-SHIFT ROUTES:
+        student.morning_route_id = data.get('morning_route_id', student.morning_route_id)
+        student.noon_route_id = data.get('noon_route_id', student.noon_route_id)
+        student.evening_route_id = data.get('evening_route_id', student.evening_route_id)
+
+        db.session.commit()
         return jsonify(student.to_dict()), 200
 
-    # 📝 2️⃣ PUT: Secure Update
-    if request.method == 'PUT':
-        try:
-            data = request.json
-            student.name = data.get('student_name', student.name)
-            student.admission_no = data.get('admission_no', student.admission_no)
-            student.grade = data.get('grade', student.grade)
-            student.parent_mobile = data.get('parent_mobile', student.parent_mobile)
-            student.rfid_tag = data.get('rfid_tag', student.rfid_tag)
-            student.branch = data.get('branch', student.branch).strip().upper()
-            student.pickup_stop_id = data.get('pickup_stop_id', student.pickup_stop_id)
-            student.bus_id = data.get('bus_id', student.bus_id)
-            student.total_fee = float(data.get('total_fee', student.total_fee))
-            student.payment_status = data.get('payment_status', student.payment_status)
-
-            db.session.commit()
-            return jsonify(student.to_dict()), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({'error': str(e)}), 500
-
-    # 🗑️ 3️⃣ DELETE: Remove Student
+    # 🗑️ 4. DELETE STUDENT (DELETE)
     if request.method == 'DELETE':
+        student = db.session.get(Student, id)
+        if not student: return jsonify({'error': 'Not found'}), 404
+        
+        if user.role != 'super_admin' and student.company_id != user.company_id:
+            return jsonify({'error': 'Unauthorized'}), 403
+            
         db.session.delete(student)
         db.session.commit()
         return jsonify({'message': 'Deleted successfully'}), 200
 
-@app.route('/api/admin/buses', methods=['GET', 'POST', 'OPTIONS'])
-def handle_admin_buses():
-    if request.method == 'OPTIONS': 
-        return _cors_response()
+# ==========================================
+# 💰 PRICING SLABS / FEE ZONES
+# ==========================================
+@app.route('/api/pricing_slabs', methods=['GET', 'OPTIONS'])
+@jwt_required()
+def get_pricing_slabs():
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
 
-    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
-    try:
-        verify_jwt_in_request()
-    except Exception:
-        return jsonify({"error": "Unauthorized"}), 401
-        
     user = db.session.get(User, int(get_jwt_identity()))
     
-    # 🕵️ 1. SUPER ADMIN (Mansoor) - Needs to see everything to manage clients
-    if user.role == 'super_admin' and not user.company_id:
-        if request.method == 'GET':
-            buses = Bus.query.all()
-            return jsonify([b.to_dict() for b in buses]), 200
+    # 🛡️ SaaS ID Logic
+    raw_cid = request.args.get('company_id')
+    final_cid = int(raw_cid) if (raw_cid and raw_cid != 'null') else user.company_id
 
-    # 🔍 2. GET Logic: Restricted by Role
+    # Using FeeZone model (ensure this matches your class name)
+    slabs = FeeZone.query.filter_by(company_id=final_cid).all()
+    return jsonify([s.to_dict() for s in slabs]), 200
+
+# ==========================================
+# 🚌 MASTER BUS CONTROLLER
+# ==========================================
+@app.route('/api/admin/buses', methods=['GET', 'POST', 'OPTIONS'])
+@jwt_required()
+def handle_admin_buses():
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
+
+    user = db.session.get(User, int(get_jwt_identity()))
+    is_super = user.role.lower() == 'super_admin'
+    
+    raw_cid = request.args.get('company_id')
+    final_cid = get_safe_id(raw_cid) if is_super else user.company_id
+
+    # 📂 1. FETCH BUSES (GET)
     if request.method == 'GET':
-        query = Bus.query.filter_by(company_id=user.company_id)
+        query = Bus.query
         
-        # 🛡️ BRANCH INCHARGE RESTRICTION
-        # If they are a standard 'admin', they ONLY see their branch buses on mobile
-        if user.role == 'admin':
-            # Assuming your Bus model has branch_id or we filter by the string name
-            # If your User model has a branch_name, use that:
-            branch_obj = db.session.get(Branch, user.branch_id)
-            if branch_obj:
-                query = query.filter(Bus.branch.ilike(f"%{branch_obj.name}%"))
+        # 🛡️ God View Logic
+        if not is_super or final_cid:
+            query = query.filter_by(company_id=final_cid)
+        
+        target_branch = request.args.get('branch', '').strip().lower()
 
-        # Allow Super Admin/School Admin to still use the filter dropdown
-        target_branch = request.args.get('branch', '').strip()
-        if target_branch and user.role != 'admin':
-            query = query.filter(Bus.branch.ilike(f"%{target_branch}%"))
+        # 🚀 Smart Filter (Role-Based)
+        if user.role.lower() == 'branch_incharge':
+            # Branch incharges are strictly locked to their ID or Name
+            search_val = (user.branch_id or "").strip().lower()
+            query = query.filter(func.lower(func.trim(Bus.branch)) == search_val)
             
-        buses = query.all()
-        return jsonify([b.to_dict() for b in buses]), 200
+        elif target_branch and target_branch not in ["all", "all branches", "null", ""]:
+            # Admins/SuperAdmins filtering by selected branch
+            query = query.filter(func.lower(func.trim(Bus.branch)) == target_branch)
 
-    # ➕ 3. POST Logic: Adding a bus
+        buses = query.all()
+        
+        # 🛠️ Enrich data with Route and Attender names
+        results = []
+        for b in buses:
+            bus_data = b.to_dict()
+            bus_data.update({
+                "morning_route_name": b.morning_route.route_name if b.morning_route else "Not Assigned",
+                "noon_route_name": b.noon_route.route_name if b.noon_route else "Not Assigned",
+                "evening_route_name": b.evening_route.route_name if b.evening_route else "Not Assigned",
+                "attender_name": b.attender.username if b.attender else "Not Assigned"
+            })
+            results.append(bus_data)
+            
+        return jsonify(results), 200
+
+    # ➕ 2. ADD BUS (POST)
     if request.method == 'POST':
         data = request.json
-        # Only School Admins or Super Admins can add buses, not Branch Incharges
-        if user.role == 'admin':
-            return jsonify({"error": "Branch Incharge cannot add buses"}), 403
-            
-        new_bus = Bus(
-            bus_no=data.get('bus_number'), 
-            company_id=user.company_id,
-            branch=data.get('branch', 'MAIN').upper().strip(),
-            status='stopped'
+        try:
+            new_bus = Bus(
+                bus_no=data.get('bus_number'), 
+                company_id=final_cid,
+                branch=str(data.get('branch', user.branch_id)).upper().strip(),
+                morning_route_id=data.get('morning_route_id'),
+                noon_route_id=data.get('noon_route_id'),
+                evening_route_id=data.get('evening_route_id'),
+                attender_id=data.get('attender_id'),
+                gps_device_id=data.get('gps_device_id'),
+                sim_no=data.get('sim_no'),
+                rfid_reader_id=data.get('rfid_reader_id'),
+                seater_capacity=data.get('seater_capacity', 30),
+                status='stopped'
             )
-        db.session.add(new_bus)
-        db.session.commit()
-        return jsonify(new_bus.to_dict()), 201
+            db.session.add(new_bus)
+            db.session.commit()
+            return jsonify(new_bus.to_dict()), 201
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
 
+# ==========================================
+# 🔧 SINGLE BUS OPERATIONS (Update/Delete)
+# ==========================================
 @app.route('/api/admin/buses/<int:bus_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @jwt_required()
-def handle_single_bus(bus_id):
-    if request.method == 'OPTIONS':
-        return _cors_response()
-
-    current_user_id = get_jwt_identity()
-    user = db.session.get(User, int(current_user_id))
-    bus = Bus.query.filter_by(id=bus_id, company_id=user.company_id).first()
+def handle_bus_item(bus_id):
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
     
+    bus = db.session.get(Bus, bus_id)
     if not bus:
         return jsonify({"error": "Bus not found"}), 404
 
-    if request.method == 'PUT':
-        try:
-            data = request.json
-            # ✅ Indented correctly to save all data
-            bus.bus_no = data.get('bus_number', bus.bus_no)
-            bus.chassis_no = data.get('chassis_no', bus.chassis_no)
-            bus.seater_capacity = data.get('seater_capacity', bus.seater_capacity)
-            bus.gps_device_id = data.get('gps_device_id', bus.gps_device_id)
-            bus.sim_no = data.get('sim_no', bus.sim_no)
-            bus.rfid_reader_id = data.get('rfid_reader_id', bus.rfid_reader_id)
-            bus.branch = data.get('branch', bus.branch).strip().upper()
-            
-            db.session.commit()
-            return jsonify(bus.to_dict()), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
-
     if request.method == 'DELETE':
-        try:
-            db.session.delete(bus)
-            db.session.commit()
-            return jsonify({"message": "Bus deleted successfully"}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
+        db.session.delete(bus)
+        db.session.commit()
+        return jsonify({"message": "Bus deleted successfully"}), 200
 
+    if request.method == 'PUT':
+        data = request.json
+        # 🚌 Update Core Info
+        bus.bus_no = data.get('bus_number', bus.bus_no)
+        bus.chassis_no = data.get('chassis_no', bus.chassis_no)
+        bus.seater_capacity = data.get('seater_capacity', bus.seater_capacity)
+        
+        # 🛣️ Update 3-Shift Routes
+        bus.morning_route_id = data.get('morning_route_id')
+        bus.noon_route_id = data.get('noon_route_id')
+        bus.evening_route_id = data.get('evening_route_id')
+        
+        # 👩‍🏫 Update Staff & Hardware
+        bus.attender_id = data.get('attender_id')
+        bus.rfid_reader_id = data.get('rfid_reader_id', bus.rfid_reader_id)
+        bus.sim_no = data.get('sim_no', bus.sim_no)
+        bus.gps_device_id = data.get('gps_device_id', bus.gps_device_id)
+        
+        db.session.commit()
+        print(f"✅ Bus {bus.bus_no} updated with Routes: AM:{bus.morning_route_id}, Noon:{bus.noon_route_id}, PM:{bus.evening_route_id}")
+        return jsonify(bus.to_dict()), 200
+
+# ==========================================
+# ⚠️ BULK DELETE (Updated with School Guard)
+# ==========================================
 @app.route('/api/admin/bulk_delete/buses', methods=['DELETE'])
 @jwt_required()
 def bulk_delete_buses():
+    user = db.session.get(User, int(get_jwt_identity()))
+    target_branch = request.args.get('branch', '').upper()
+    
+    # Determine the school ID safely
+    raw_cid = request.args.get('company_id')
+    final_cid = get_safe_id(raw_cid) if user.role == 'super_admin' else user.company_id
+
+    if not target_branch or not final_cid:
+        return jsonify({"error": "Branch and Company ID required"}), 400
+
     try:
-        branch = request.args.get('branch', 'TEST1').upper()
-        # ⚠️ This deletes ALL buses for the specified branch
-        deleted_count = Bus.query.filter_by(branch=branch).delete()
+        # ✅ THE FIX: Only delete buses for this specific branch AND this specific school
+        deleted_count = Bus.query.filter_by(branch=target_branch, company_id=final_cid).delete()
         db.session.commit()
-        return jsonify({"message": f"Successfully deleted {deleted_count} buses from {branch}"}), 200
+        return jsonify({"message": f"Successfully deleted {deleted_count} buses from {target_branch}"}), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500            
+        return jsonify({"error": str(e)}), 500          
         
-# 📂 SMART BULK UPLOAD (Fixed Field Names)
+# ==========================================
+# 📂 SMART BULK UPLOAD (Expanded for SaaS)
+# ==========================================
 @app.route('/api/admin/upload/bulk', methods=['POST'])
 @jwt_required()
 def smart_bulk_upload():
     user = db.session.get(User, int(get_jwt_identity()))
     file = request.files.get('file')
     raw_cat = (request.form.get('category') or '').lower().strip()
-    form_branch = request.form.get('branch', '').strip().upper() # ✅ FORCE UPPERCASE
+    form_branch = request.form.get('branch', '').strip().upper() 
     
     if not file:
         return jsonify({"error": "No file provided"}), 400
 
     try:
-        # Load file safely
+        # Read file safely
         df = pd.read_excel(file, dtype=str) if file.filename.endswith('.xlsx') else pd.read_csv(file, dtype=str)
-        df.columns = df.columns.str.strip() 
+        df.columns = df.columns.str.strip() # Remove spaces from headers
         count = 0
 
-        # 📍 1. BUS STOPS
+        # 📍 1. BUS STOPS (Fixed Model Name: Stop)
         if "stop" in raw_cat:
-            # ✅ Standardize form_branch right at the start
-            form_branch = form_branch.strip().upper()
-            print(f"📍 PROCESSING: Stop Upload for standardized Branch: {form_branch}")
-
             for _, row in df.iterrows():
-                stop_name = str(row.get('Stop Name') or row.get('stop_name') or '').strip()
-                if not stop_name or stop_name.lower() in ['nan', '']: continue
-
-                z_name = str(row.get('Zone', 'General')).strip()
+                stop_name = str(row.get('Stop Name') or '').strip()
+                if not stop_name: continue
                 
-                # 🔍 Fetch Zone Object - Using ilike to be safe with casing
-                zone_obj = FeeZone.query.filter(
-                    FeeZone.zone_name.ilike(z_name), 
-                    FeeZone.branch == form_branch
-                ).first()
-
-                # Handle distance and coordinates
-                try:
-                    km = float(row.get('Distance (KM)') or row.get('KM') or row.get('km') or 0.0)
-                    lat = float(row.get('Latitude') or row.get('latitude') or 0.0)
-                    lng = float(row.get('Longitude') or row.get('longitude') or 0.0)
-                except (ValueError, TypeError):
-                    km, lat, lng = 0.0, 0.0, 0.0
-
-                # 🔍 Check if stop exists for this specific branch and company
-                stop = BusStop.query.filter_by(
-                    stop_name=stop_name, 
-                    branch=form_branch, 
-                    company_id=user.company_id
-                ).first()
+                z_name = str(row.get('Zone', 'General')).strip()
+                km_val = float(row.get('Distance (KM)', 0.0))
+                lat_val = float(row.get('Latitude', 0.0))
+                lng_val = float(row.get('Longitude', 0.0))
+                
+                # 🚀 FIXED: Changed 'BusStop' to 'Stop' to match your model
+                stop = Stop.query.filter_by(stop_name=stop_name, branch=form_branch, company_id=user.company_id).first()
                 
                 if stop:
+                    stop.km = km_val
+                    stop.latitude = lat_val
+                    stop.longitude = lng_val
                     stop.zone = z_name
-                    stop.fee_zone_id = zone_obj.id if zone_obj else None
-                    stop.km = km  
-                    stop.latitude, stop.longitude = lat, lng
-                    print(f"🔄 Updated Stop: {stop_name}")
                 else:
-                    db.session.add(BusStop(
+                    db.session.add(Stop(
                         stop_name=stop_name, 
-                        zone=z_name,
+                        zone=z_name, 
                         branch=form_branch, 
-                        company_id=user.company_id,
-                        fee_zone_id=zone_obj.id if zone_obj else None,
-                        km=km, 
-                        latitude=lat, 
-                        longitude=lng
+                        company_id=user.company_id, 
+                        km=km_val,
+                        latitude=lat_val, 
+                        longitude=lng_val
                     ))
-                    print(f"✨ Created Stop: {stop_name}")
-                
                 count += 1
 
-        # 🎓 2. STUDENTS
+        # 🎓 2. STUDENTS (Handles Multi-Shift Routes)
         elif "student" in raw_cat:
-            print(f"🎓 DETECTED: Student Upload for {form_branch}")
             for _, row in df.iterrows():
-                name = str(row.get('Student Name') or row.get('name') or '').strip()
-                adm_no = str(row.get('Admission No') or row.get('admission_no') or '').strip()
-                if not adm_no or not name or name.lower() == 'nan': continue
+                name = str(row.get('Student Name') or '').strip()
+                adm_no = str(row.get('Admission No') or '').strip()
+                if not adm_no or not name: continue
 
-                # 🚀 GET GRADE AND DIV FROM EXCEL
-                # We use .get() to look for 'Div' specifically as per your file
-                grade = str(row.get('Grade') or '').strip()
-                division = str(row.get('Div') or row.get('Division') or '').strip()
-
-                # 🚀 GET ZONE AND STOP NAMES FROM EXCEL
-                excel_zone = str(row.get('Zone') or '').strip()
-                p_stop_name = str(row.get('Pickup Stop') or '').strip()
-                d_stop_name = str(row.get('Drop Stop') or '').strip()
-                bus_no = str(row.get('Assigned Bus') or '').strip()
-
-                # 🔍 Lookup foreign keys
-                p_stop_obj = BusStop.query.filter_by(
-                    stop_name=p_stop_name, 
-                    zone=excel_zone, 
-                    branch=form_branch, 
-                    company_id=user.company_id
-                ).first()
-
-                d_stop_obj = BusStop.query.filter_by(
-                    stop_name=d_stop_name, 
-                    branch=form_branch, 
-                    company_id=user.company_id
-                ).first() if d_stop_name != p_stop_name else p_stop_obj
-
-                bus_obj = Bus.query.filter_by(
-                    bus_no=bus_no, 
-                    branch=form_branch, 
-                    company_id=user.company_id
-                ).first()
-
+                # 🛡️ Force the student to belong to the logged-in user's company and branch
                 student = Student.query.filter_by(admission_no=adm_no, company_id=user.company_id).first()
                 
+                # Lookups
+                am_r = Route.query.filter_by(route_name=str(row.get('AM Route','')).strip(), shift='Morning', company_id=user.company_id).first()
+                noon_r = Route.query.filter_by(route_name=str(row.get('Noon Route','')).strip(), shift='Noon', company_id=user.company_id).first()
+                pm_r = Route.query.filter_by(route_name=str(row.get('PM Route','')).strip(), shift='Evening', company_id=user.company_id).first()
+
                 if student:
-                    student.name, student.branch = name, form_branch
-                    student.grade = grade # ✅ UPDATED
-                    student.division = division # ✅ NEW FIELD
-                    student.parent_mobile = str(row.get('Parent Mobile', student.parent_mobile))
-                    student.rfid_tag = str(row.get('RFID Tag', student.rfid_tag))
-                    student.pickup_stop_id = p_stop_obj.id if p_stop_obj else student.pickup_stop_id
-                    student.drop_stop_id = d_stop_obj.id if d_stop_obj else student.drop_stop_id
-                    student.bus_id = bus_obj.id if bus_obj else student.bus_id
-                    student.total_fee = float(row.get('Fee') or student.total_fee or 0.0)
-                    student.payment_status = str(row.get('Payment Status', student.payment_status or 'Pending'))
+                    student.name = name
+                    student.branch = form_branch # 🚀 Force update branch
+                    student.company_id = user.company_id
+                    student.morning_route_id = am_r.id if am_r else student.morning_route_id
                 else:
                     db.session.add(Student(
-                        name=name, admission_no=adm_no, branch=form_branch,
-                        company_id=user.company_id, 
-                        grade=grade, # ✅ UPDATED
-                        division=division, # ✅ NEW FIELD
-                        parent_mobile=str(row.get('Parent Mobile', '')),
-                        rfid_tag=str(row.get('RFID Tag', '')),
-                        pickup_stop_id=p_stop_obj.id if p_stop_obj else None,
-                        drop_stop_id=d_stop_obj.id if d_stop_obj else None,
-                        bus_id=bus_obj.id if bus_obj else None,
-                        total_fee=float(row.get('Fee') or 0.0),
-                        payment_status=str(row.get('Payment Status') or 'Pending')
-                    ))
-                count += 1
-
-        # 🚌 3. BUS FLEET bulk upload
-        elif "bus" in raw_cat:
-            form_branch = form_branch.strip().upper() # ✅ Keep it standardized
-            print(f"🚌 DETECTED: Bus Fleet Upload for {form_branch}")
-            
-            # 🏫 Fetch school coordinates once to use as a starting point for all buses
-            branch_obj = Branch.query.filter_by(name=form_branch, company_id=user.company_id).first()
-            default_lat = branch_obj.latitude if (branch_obj and branch_obj.latitude) else 13.1065
-            default_lng = branch_obj.longitude if (branch_obj and branch_obj.longitude) else 77.5779
-
-            for _, row in df.iterrows():
-                bus_num = str(row.get('Bus Number') or row.get('bus_no') or '').strip()
-                if not bus_num or bus_num.lower() == 'nan': continue
-
-                # Find existing bus by Number + Company
-                bus = Bus.query.filter_by(bus_no=bus_num, company_id=user.company_id).first()
-                
-                gps_id = str(row.get('GPS Device ID', '')).strip().replace('.0', '')
-                rfid_reader = str(row.get('RFID Reader ID', '')).strip()
-                sim_no = str(row.get('SIM No', '')).strip()
-
-                if bus:
-                    bus.chassis_no = str(row.get('Chassis Number') or bus.chassis_no)
-                    bus.branch = form_branch
-                    bus.gps_device_id = gps_id if gps_id else bus.gps_device_id
-                    bus.rfid_reader_id = rfid_reader if rfid_reader else bus.rfid_reader_id
-                    bus.sim_no = sim_no if sim_no else bus.sim_no
-                    
-                    # ✅ If bus exists but has no coordinates, give it the school location
-                    if not bus.last_lat or bus.last_lat == 0:
-                        bus.last_lat, bus.last_lng = default_lat, default_lng
-                else:
-                    db.session.add(Bus(
-                        bus_no=bus_num, 
-                        gps_device_id=gps_id,
-                        rfid_reader_id=rfid_reader,
-                        sim_no=sim_no,
-                        branch=form_branch, 
+                        name=name, 
+                        admission_no=adm_no, 
+                        branch=form_branch, # This is 'TESTONE' from Flutter
                         company_id=user.company_id,
-                        seater_capacity=int(row.get('Seater Capacity', 30)), 
-                        status='stopped',
-                        # ✅ New buses start at the school coordinates
-                        last_lat=default_lat,
-                        last_lng=default_lng
+                        grade=row.get('Grade', 'N/A'), 
+                        division=row.get('Div', 'A'),
+                        morning_route_id=am_r.id if am_r else None,
+                        noon_route_id=noon_r.id if noon_r else None,
+                        evening_route_id=pm_r.id if pm_r else None
                     ))
                 count += 1
 
-        db.session.commit() # This actually saves the changes to the database
-        
-        print(f"✅ BULK SUCCESS: Processed {count} records for {form_branch}")
-        
-        return jsonify({
-            "message": f"Successfully uploaded {count} {raw_cat} records",
-            "branch": form_branch,
-            "count": count
-        }), 201 # 201 means "Created"
+        # 👩‍🏫 3. LADY ATTENDERS
+        elif "attender" in raw_cat:
+            for _, row in df.iterrows():
+                name = str(row.get('Attender Name') or '').strip()
+                phone = str(row.get('Phone Number') or '').strip()
+                if not name or not phone: continue
+
+                attender = User.query.filter_by(contact_number=phone, company_id=user.company_id).first()
+                if not attender:
+                    db.session.add(User(
+                        username=name, contact_number=phone, role='attender',
+                        company_id=user.company_id, branch_id=form_branch,
+                        password_hash=generate_password_hash("1234"),
+                        license_info=str(row.get('Aadhar / ID Number', ''))
+                    ))
+                    count += 1
+
+        # 🛣️ 4. ROUTES
+        elif "route" in raw_cat:
+            for _, row in df.iterrows():
+                r_name = str(row.get('Route Name') or '').strip()
+                # Default to Morning if shift is missing
+                r_shift = str(row.get('Shift') or 'Morning').strip().capitalize() 
+                if not r_name: continue
+
+                exists = Route.query.filter_by(route_name=r_name, shift=r_shift, company_id=user.company_id).first()
+                if not exists:
+                    db.session.add(Route(route_name=r_name, shift=r_shift, company_id=user.company_id))
+                    count += 1
+
+# 🚌 5. BUSES (The Missing Link!)
+        elif "bus" in raw_cat:
+            for _, row in df.iterrows():
+                b_no = str(row.get('Bus Number') or '').strip()
+                if not b_no: continue
+
+                # Look up Route IDs by their names from the Excel
+                am_r = Route.query.filter_by(route_name=str(row.get('Morning Route', '')).strip(), shift='Morning', company_id=user.company_id).first()
+                noon_r = Route.query.filter_by(route_name=str(row.get('Noon Route', '')).strip(), shift='Noon', company_id=user.company_id).first()
+                pm_r = Route.query.filter_by(route_name=str(row.get('Evening Route', '')).strip(), shift='Evening', company_id=user.company_id).first()
+                
+                # Look up Attender by Name
+                attender = User.query.filter_by(username=str(row.get('Lady Attender', '')).strip(), role='attender', company_id=user.company_id).first()
+
+                bus = Bus.query.filter_by(bus_no=b_no, company_id=user.company_id).first()
+                
+                if bus:
+                    # Update existing bus info
+                    bus.branch = form_branch
+                    bus.morning_route_id = am_r.id if am_r else bus.morning_route_id
+                    bus.noon_route_id = noon_r.id if noon_r else bus.noon_route_id
+                    bus.evening_route_id = pm_r.id if pm_r else bus.evening_route_id
+                    bus.attender_id = attender.id if attender else bus.attender_id
+                    bus.seater_capacity = int(row.get('Seater Capacity', 30))
+                    bus.gps_device_id = str(row.get('GPS Device ID', ''))
+                else:
+                    # Create new bus
+                    db.session.add(Bus(
+                        bus_no=b_no,
+                        company_id=user.company_id,
+                        branch=form_branch,
+                        morning_route_id=am_r.id if am_r else None,
+                        noon_route_id=noon_r.id if noon_r else None,
+                        evening_route_id=pm_r.id if pm_r else None,
+                        attender_id=attender.id if attender else None,
+                        seater_capacity=int(row.get('Seater Capacity', 30)),
+                        gps_device_id=str(row.get('GPS Device ID', '')),
+                        status='stopped'
+                    ))
+                count += 1
+
+        db.session.commit()
+        return jsonify({"message": f"Uploaded {count} {raw_cat} records successfully"}), 201
 
     except Exception as e:
-        db.session.rollback() # If any error happens, undo everything to prevent partial data
-        print(f"❌ BULK ERROR: {str(e)}")
+        db.session.rollback()
+        print(f"❌ BULK UPLOAD ERROR: {str(e)}")
         return jsonify({"error": str(e)}), 500
     
 # ==========================================
@@ -928,93 +1093,100 @@ def update_hardware_gps():
     return jsonify({"error": f"Device {device_id} not registered"}), 404
 
 # ==========================================
-# 📍 BUS STOP & FEE LOGIC (Final GPS Enabled)
+# 📍 SECURE STOPS MANAGEMENT (SaaS)
 # ==========================================
 @app.route('/api/stops', methods=['GET', 'POST', 'OPTIONS'])
-@jwt_required() # 🛡️ Ensure only logged-in users can access this
-def handle_stops_unified():
+@app.route('/api/stops/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS']) # 👈 Added PUT here
+@jwt_required()
+def handle_stops_master(id=None):
     if request.method == 'OPTIONS': 
-        return _cors_response()
+        return jsonify({'message': 'CORS OK'}), 200
 
-    # Get the current logged-in user's company info
-    user_id = get_jwt_identity()
-    user = db.session.get(User, user_id)
+    user = db.session.get(User, int(get_jwt_identity()))
+    
+    # 🛡️ 1. Determine the School ID
+    raw_cid = request.args.get('company_id')
+    target_cid = get_safe_id(raw_cid)
+    final_cid = target_cid if (user.role == 'super_admin' and target_cid) else user.company_id
 
+    # 📂 FETCH STOPS (GET) - Fixed for Parent View
     if request.method == 'GET':
-        try:
-            branch = request.args.get('branch', '').strip().upper()
-            
-            # 🛡️ Filter by BOTH Branch name AND Company ID
-            query = BusStop.query.filter_by(company_id=user.company_id)
-            
-            if branch and branch != "ALL":
-                stops = query.filter(BusStop.branch == branch).all()
-            else:
-                stops = query.all()
-            
-            print(f"📍 FETCH: {len(stops)} stops for {user.company.name} - Branch: {branch}")
-            return jsonify([s.to_dict() for s in stops]), 200
-        except Exception as e:
-            return jsonify([]), 200
+        from sqlalchemy import func
+        query = Stop.query.filter_by(company_id=final_cid)
+        
+        # 🚀 1. Get the branch name from the URL (?branch=testone)
+        target_branch = request.args.get('branch', '').strip().upper()
 
+        # 🛡️ 2. SMART SECURITY LOGIC
+        if user.role.lower() == 'branch_incharge':
+            # 🔒 Branch Incharges stay locked to their specific assigned branch name
+            search_val = (user.branch_id or "").strip()
+            search_branch = search_val.upper()
+            if search_val.isdigit():
+                branch_obj = db.session.get(Branch, int(search_val))
+                if branch_obj: search_branch = branch_obj.name.upper()
+            
+            query = query.filter(func.upper(func.trim(Stop.branch)) == search_branch)
+            print(f"🔒 Staff Security: Locked to {search_branch}")
+
+        elif target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
+            # 🔓 Admins / Super Admins only filter if they picked a specific branch
+            query = query.filter(func.upper(func.trim(Stop.branch)) == target_branch)
+            print(f"🔓 Admin Filter: Showing {target_branch}")
+
+        stops = query.order_by(Stop.stop_name.asc()).all()
+        return jsonify([s.to_dict() for s in stops]), 200
+
+    # ➕ ADD STOP (POST)
     if request.method == 'POST':
+        data = request.json
         try:
-            data = request.json
-            new_stop = BusStop(
+            new_stop = Stop(
                 stop_name=data.get('stop_name'),
-                zone=data.get('zone', 'General'), 
-                km=float(data.get('km', 0)),
-                latitude=float(data.get('latitude', 0)),
-                longitude=float(data.get('longitude', 0)),
-                branch=data.get('branch', 'PSBN').strip().upper(),
-                # ✅ Essential for SaaS: Link this stop to the current user's school
-                company_id=user.company_id 
+                latitude=float(data.get('latitude', 0.0)),
+                longitude=float(data.get('longitude', 0.0)),
+                branch=str(data.get('branch', 'MAIN')).upper(),
+                zone=data.get('zone'), 
+                km=float(data.get('km', 0.0)),
+                company_id=final_cid,
+                # 🔗 Link the ID so auto-fee-calculation works!
+                fee_zone_id=data.get('fee_zone_id') 
             )
             db.session.add(new_stop)
             db.session.commit()
-            return jsonify({"message": "Stop saved successfully"}), 201
+            return jsonify(new_stop.to_dict()), 201
         except Exception as e:
             db.session.rollback()
-            return jsonify({"error": str(e)}), 500
+            return jsonify({'error': str(e)}), 500
 
-# ==========================================
-# 🔄 UPDATE & 🗑️ DELETE STOP LOGIC
-# ==========================================
-@app.route('/api/stops/<int:stop_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
-def handle_single_stop(stop_id):
-    if request.method == 'OPTIONS':
-        return jsonify({'message': 'CORS OK'}), 200
-        
-    stop = db.session.get(BusStop, stop_id)
-    if not stop:
-        return jsonify({"error": "Stop not found"}), 404
-
-    # --- HANDLE UPDATE (PUT) ---
+    # 📝 UPDATE STOP (PUT)
     if request.method == 'PUT':
-        try:
-            data = request.json
-            stop.stop_name = data.get('stop_name', stop.stop_name)
-            stop.zone = data.get('zone', stop.zone)
-            stop.km = float(data.get('km', stop.km))
-            stop.latitude = float(data.get('latitude', stop.latitude))
-            stop.longitude = float(data.get('longitude', stop.longitude))
-            stop.branch = data.get('branch', stop.branch)
-            
-            db.session.commit()
-            return jsonify({"message": "Stop updated successfully"}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
+        stop = Stop.query.get(id)
+        if not stop: return jsonify({'error': 'Not found'}), 404
+        if user.role != 'super_admin' and stop.company_id != user.company_id:
+            return jsonify({'error': 'Unauthorized'}), 403
 
-    # --- HANDLE DELETE (DELETE) ---
+        data = request.json
+        stop.stop_name = data.get('stop_name', stop.stop_name)
+        stop.km = float(data.get('km', stop.km))
+        stop.zone = data.get('zone', stop.zone)
+        stop.fee_zone_id = data.get('fee_zone_id', stop.fee_zone_id)
+        
+        db.session.commit()
+        return jsonify(stop.to_dict()), 200
+
+    # 🗑️ DELETE STOP (DELETE)
     if request.method == 'DELETE':
-        try:
-            db.session.delete(stop)
-            db.session.commit()
-            return jsonify({"message": "Stop deleted successfully"}), 200
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
+        stop = Stop.query.get(id)
+        if not stop: return jsonify({'error': 'Stop not found'}), 404
+        
+        # Security: Only owner or Super Admin
+        if user.role != 'super_admin' and stop.company_id != user.company_id:
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        db.session.delete(stop)
+        db.session.commit()
+        return jsonify({'message': 'Stop deleted'}), 200
 
 @app.route('/api/calculate_fee', methods=['POST', 'OPTIONS'])
 def calculate_fee():
@@ -1025,12 +1197,13 @@ def calculate_fee():
         stop_id = data.get('stop_id')
         branch = data.get('branch', 'PSBN').strip()
         
-        # 1. Fetch the stop
-        stop = db.session.get(BusStop, stop_id)
+        # 1. Fetch the stop using the correct model 'Stop'
+        stop = db.session.get(Stop, stop_id)
         if not stop:
+            print(f"⚠️ Stop ID {stop_id} not found.")
             return jsonify({'price': 0}), 200
             
-        # 2. Smart Conversion for distance
+        # 2. Smart Conversion for distance (handles "1.5 KM" or 1.5)
         raw_km = getattr(stop, 'km', 0)
         try:
             if isinstance(raw_km, str):
@@ -1040,16 +1213,14 @@ def calculate_fee():
         except:
             dist = 0.0
 
-        # ✅ FIXED: Changed PricingSlab to FeeZone
-        # Also ensure we match based on the zone_name if needed, 
-        # but here we use the distance logic you established.
+        # 3. Find the FeeZone for THIS specific school (company_id)
         zone = FeeZone.query.filter(
+            FeeZone.company_id == stop.company_id, # 🛡️ SaaS isolation
             FeeZone.branch.ilike(branch), 
             FeeZone.min_km <= dist,
             FeeZone.max_km >= dist
         ).first()
         
-        # 3. Ensure price is not null for Flutter safety
         final_price = 0
         if zone and zone.price is not None:
             final_price = int(zone.price)
@@ -1067,28 +1238,47 @@ def calculate_fee():
 @app.route('/api/hardware/gps/all', methods=['GET'])
 def get_all_bus_locations():
     try:
-        # We fetch all buses that have a GPS ID assigned
+        # 1. Fetch only buses that have a GPS device ID
         buses = Bus.query.filter(Bus.gps_device_id != None).all()
         
         results = []
         for bus in buses:
+            # 🚀 FIXED: Changed bus_number to bus_no to match your DB model
             results.append({
-                "bus_number": bus.bus_number,
-                "lat": bus.last_lat or 13.1187, # Default to school if no GPS signal yet
-                "lng": bus.last_lng or 77.5752,
-                "status": bus.status or "stopped",
-                "speed": getattr(bus, 'speed', 0),
+                "bus_number": getattr(bus, 'bus_no', 'Unknown'), 
+                "lat": getattr(bus, 'last_lat', 13.1187) or 13.1187, 
+                "lng": getattr(bus, 'last_lng', 77.5752) or 77.5752,
+                "status": getattr(bus, 'status', 'stopped') or "stopped",
+                "speed": getattr(bus, 'speed', 0) or 0,
                 "device_id": bus.gps_device_id
             })
             
         return jsonify(results), 200
     except Exception as e:
+        # 🐛 This will print the EXACT error in your Python terminal
+        print(f"❌ GPS API CRASH: {str(e)}") 
         return jsonify({"error": str(e)}), 500
 
 # 📊 SMART DASHBOARD STATS (Fixed to prevent Crash)
-@app.route('/api/admin/stats', methods=['GET', 'OPTIONS'])
-@jwt_required()
+@app.route('/api/admin/stats', methods=['GET', 'POST', 'OPTIONS'])
+@jwt_required() # 🚀 ADD THIS GUARD HERE
 def get_stats():
+    # Handle the "Preflight" check for browsers
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'CORS OK'}), 200
+
+    # Now it is safe to use get_jwt_identity() because of the guard above
+    user_id = get_jwt_identity()
+    user = db.session.get(User, int(user_id))
+    
+    # Get the branch from the URL
+    branch_name = request.args.get('branch', 'All Branches')
+    
+    # 🛡️ SECURITY: If not Super Admin, they can ONLY see their own school's stats
+    if user.role != 'super_admin':
+        # Force the branch to be their school name instead of "All Branches"
+        branch_name = user.company.name if user.company else 'Main'
+
     user = db.session.get(User, int(get_jwt_identity()))
     
     # 🕵️ SUPER ADMIN (Mansoor) Logic
@@ -1102,7 +1292,7 @@ def get_stats():
     # 🏢 SCHOOL ADMIN / BRANCH INCHARGE Logic
     query = Bus.query.filter_by(company_id=user.company_id)
     if user.role == 'admin': # Branch Incharge
-        query = query.filter_by(branch_id=user.branch_id)
+        query = query.filter_by(company_id=user.company_id)
     
     return jsonify({
         "moving": query.filter_by(status='moving').count(),
@@ -1111,247 +1301,267 @@ def get_stats():
         "total": query.count(),
         "students": Student.query.filter_by(company_id=user.company_id).count()
     }), 200
-
-@app.route('/api/branches', methods=['GET'])
-@jwt_required()
-def fetch_branches():
-    user = db.session.get(User, int(get_jwt_identity()))
-    
-    # 🛡️ ROLE LOGIC
-    if user.role == 'super_admin':
-        # Super Admin sees ALL branches of the school
-        branches = Branch.query.filter_by(company_id=user.company_id).all()
-    else:
-        # Branch Incharge ONLY sees their own branch
-        branches = Branch.query.filter_by(id=user.branch_id).all()
-        
-    return jsonify([{"id": b.id, "name": b.name} for b in branches]), 200
     
 # 🗺️ 2. FIX THE MAP (Previously 500-ing)
 @app.route('/api/admin/fleet_locations', methods=['GET', 'OPTIONS'])
 @jwt_required()
 def get_fleet_locations():
-    if request.method == 'OPTIONS': 
-        return jsonify({'ok': True}), 200
-
+    if request.method == 'OPTIONS': return _cors_response()
+    
     try:
-        # 1. Get User and Identity
         user = db.session.get(User, int(get_jwt_identity()))
+        is_super = user.role.lower() == 'super_admin'
+        
+        # 🏢 Get target company from URL if managing a specific school
+        raw_cid = request.args.get('company_id')
+        final_cid = get_safe_id(raw_cid) if is_super else user.company_id
+        
         markers = []
+        branch_name = request.args.get('branch', '').strip().upper()
+        is_global_view = not branch_name or branch_name in ["ALL BRANCHES", "GLOBAL", "NULL", ""]
 
-        # 2. Handle Branch Filtering
-        branch_param = request.args.get('branch', '').strip().upper()
+        # 🏫 1. Query Schools (Branches)
+        school_query = Branch.query
+        # 🛡️ God View Logic: Only filter by company if we aren't Super Admin OR if a specific school is picked
+        if not is_super or final_cid:
+            school_query = school_query.filter_by(company_id=final_cid)
         
-        # 🏢 Start with a base query for the school icons
-        branches_query = Branch.query.filter_by(company_id=user.company_id)
+        if not is_global_view:
+            school_query = school_query.filter(func.upper(Branch.name) == branch_name)
         
-        # 🚌 Start with a base query for the buses
-        bus_query = Bus.query.filter_by(company_id=user.company_id)
-
-        # 🛡️ Apply filters ONLY if a specific branch is selected
-        if branch_param and branch_param not in ["ALL BRANCHES", "GLOBAL", user.company.name.upper()]:
-            bus_query = bus_query.filter(Bus.branch == branch_param)
-            branches_query = branches_query.filter(Branch.name == branch_param)
-
-        # 3. Process Schools (Branches)
-        branches = branches_query.all()
-        for b in branches:
-            if b.latitude and b.longitude:
+        for br in school_query.all():
+            if br.latitude:
                 markers.append({
-                    "id": f"branch_{b.id}",
-                    "type": "school",
-                    "name": b.name,
-                    "lat": float(b.latitude),
-                    "lng": float(b.longitude)
+                    "id": f"school_{br.id}", 
+                    "type": "school", 
+                    "name": br.name,
+                    "lat": float(br.latitude), 
+                    "lng": float(br.longitude)
                 })
 
-        # 4. Process Buses
-        buses = bus_query.all()  # ✅ Now respects the filter!
-        for bus in buses:
-            # 🛰️ Coordinate Logic
-            lat = getattr(bus, 'last_latitude', None) or getattr(bus, 'last_lat', None) or getattr(bus, 'latitude', None)
-            lng = getattr(bus, 'last_longitude', None) or getattr(bus, 'last_lng', None) or getattr(bus, 'longitude', None)
+        # 🏢 2. Query Buses
+        bus_query = Bus.query
+        # 🛡️ God View Logic: Show all buses for Super Admin unless a specific school is picked
+        if not is_super or final_cid:
+            bus_query = bus_query.filter_by(company_id=final_cid)
+        
+        if not is_global_view:
+            bus_query = bus_query.filter(func.upper(Bus.branch) == branch_name)
+
+        buses = bus_query.all()
+        for i, bus in enumerate(buses):
+            lat = float(getattr(bus, 'last_lat', 13.1187) or 13.1187)
+            lng = float(getattr(bus, 'last_lng', 77.5752) or 77.5752)
             
-            # 🏷️ Name Logic (The fix for "Unknown Bus")
-            bus_name = getattr(bus, 'bus_number', None) or \
-                       getattr(bus, 'registration_no', None) or \
-                       getattr(bus, 'reg_no', None) or \
-                       getattr(bus, 'bus_no', None) or \
-                       getattr(bus, 'registration_number', None) or "Unnamed"
+            markers.append({
+                "id": f"bus_{bus.id}", 
+                "type": "bus", 
+                "name": bus.bus_no,
+                "lat": lat + (0.0004 * i),
+                "lng": lng + (0.0004 * i),
+                "status": "Active"
+            })
 
-            if lat and lng and float(lat) != 0.0:
-                markers.append({
-                    "id": f"bus_{bus.id}",
-                    "type": "bus",
-                    "name": bus_name,
-                    "lat": float(lat),
-                    "lng": float(lng),
-                    "status": getattr(bus, 'status', 'Stopped')
-                })
-            else:
-                print(f"⚠️ SKIPPING BUS {bus_name}: No coordinates found.")
-
-        print(f"📡 API SUCCESS: Sending {len(markers)} markers for branch: {branch_param or 'ALL'}")
         return jsonify(markers), 200
-
     except Exception as e:
-        print(f"❌ MAP API ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
-#  🚖 DRIVER MANAGEMENT
+# 👩‍🏫 LADY ATTENDER MANAGEMENT (SaaS)
 # ==========================================
-@app.route('/api/admin/drivers', methods=['GET', 'POST'])
+@app.route('/api/admin/attenders', methods=['GET', 'POST', 'OPTIONS'])
 @jwt_required()
-def handle_drivers():
-    user = db.session.get(User, get_jwt_identity())
+def handle_admin_attenders():
+    if request.method == 'OPTIONS': 
+        return jsonify({'message': 'OK'}), 200
+
+    user = db.session.get(User, int(get_jwt_identity()))
+    is_super = user.role.lower() == 'super_admin'
     
-    # 📂 FETCH DRIVERS (GET)
+    # 🏢 Determine the School ID (SaaS Isolation)
+    raw_cid = request.args.get('company_id')
+    final_cid = get_safe_id(raw_cid) if is_super else user.company_id
+
+    # 📂 1. FETCH ATTENDERS (GET)
     if request.method == 'GET':
-        # 🚀 THE FIX: Only fetch drivers for THIS school
-        drivers = User.query.filter_by(role='driver', company_id=user.company_id).all()
-        return jsonify([{
-            'id': d.id, 
-            'name': d.username, 
-            'phone': d.contact_number, 
-            'license': d.license_info
-        } for d in drivers]), 200
+        from sqlalchemy import func
+        query = User.query.filter_by(company_id=final_cid, role='attender')
+        
+        # Get branch name from Flutter (e.g., 'TESTTWO')
+        target_branch = request.args.get('branch', '').strip().upper()
 
-    # 📝 ADD DRIVER (POST)
-    try:
+        # 🛡️ SMART FILTERING
+        if user.role.lower() == 'branch_incharge':
+            # 🔒 Branch Incharges only see their own branch
+            search_val = (user.branch_id or "").strip().upper()
+            query = query.filter(func.upper(User.branch_id) == search_val)
+        
+        elif target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
+            # 🔓 Admins filter by selected branch
+            query = query.filter(func.upper(User.branch_id) == target_branch)
+            print(f"🕵️‍♂️ Admin Filtering Attenders for: {target_branch}")
+
+        attenders = query.all()
+        return jsonify([u.to_dict() for u in attenders]), 200
+
+    # ➕ 2. ADD ATTENDER (POST)
+    if request.method == 'POST':
         data = request.json
-        if User.query.filter_by(username=data.get('name')).first():
-             return jsonify({'error': 'Driver username already exists'}), 400
+        phone_as_username = data.get('phone') 
+        real_name = data.get('username') # This is "Shilpa" from Flutter
+        branch_from_flutter = data.get('branch', '').strip().upper()
+        
+        # 🛡️ 1. Determine assigned_branch
+        if user.role.lower() == 'branch_incharge':
+            assigned_branch = (user.branch_id or "").strip().upper()
+        else:
+            assigned_branch = "MAIN" if branch_from_flutter in ["ALL", "ALL BRANCHES", ""] else branch_from_flutter
 
-        new_driver = User(
-            username=data.get('name'),
-            role='driver',
-            company_id=user.company_id, # 🚀 Tag with school
-            password_hash=generate_password_hash('1234'),
-            contact_number=data.get('phone'),
-            license_info=data.get('license')
-        )
-        db.session.add(new_driver)
+        try:
+            # 🛡️ 2. Unique Check
+            existing_user = User.query.filter_by(username=phone_as_username).first()
+            if existing_user:
+                return jsonify({"error": f"Phone number {phone_as_username} is already registered."}), 400
+
+            new_attender = User(
+                username=phone_as_username, 
+                name=real_name,             # 👈 SAVE THE REAL NAME HERE
+                password_hash=generate_password_hash(data.get('password', '1234')),
+                role='attender',
+                company_id=final_cid,
+                branch_id=assigned_branch, 
+                contact_number=data.get('phone'),
+                license_info=data.get('license_info')
+            )
+            db.session.add(new_attender)
+            db.session.commit()
+            return jsonify(new_attender.to_dict()), 201
+                
+        except Exception as e:
+            db.session.rollback()
+            error_msg = str(e)
+            if "users.license_info" in error_msg:
+                clean_error = "This Aadhar/ID is already registered to another staff member."
+            else:
+                clean_error = "Database Error: " + error_msg
+            return jsonify({"error": clean_error}), 400
+
+# 📝 Update Attender (Fixes the 'phone' attribute error)
+@app.route('/api/admin/attenders/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@jwt_required()
+def handle_single_attender(id):
+    if request.method == 'OPTIONS': return _cors_response()
+    
+    user = db.session.get(User, id)
+    if not user: return jsonify({"error": "Staff member not found"}), 404
+
+    if request.method == 'DELETE':
+        db.session.delete(user)
         db.session.commit()
-        return jsonify({'message': 'Driver added successfully'}), 201
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"message": "Staff deleted successfully"}), 200
 
+    # 📝 3. UPDATE ATTENDER (PUT)
+    if request.method == 'PUT':
+        attender = db.session.get(User, id)
+        if not attender: return jsonify({'error': 'Not found'}), 404
+        
+        data = request.json
+        # 🚀 THE FIX: Update the name field during edits
+        # Inside your PUT logic for attenders:
+        attender.name = data.get('username', attender.name) # Now 'name' is a valid attribute!
+        attender.contact_number = data.get('phone', attender.contact_number)
+        attender.license_info = data.get('license_info', attender.license_info)
+        attender.branch_id = data.get('branch', attender.branch_id).upper()
+
+        db.session.commit()
+        return jsonify(attender.to_dict()), 200
+
+# ==========================================
+# 📥 UNIFIED DOWNLOAD (Excel Exporter)
+# ==========================================
 @app.route('/api/admin/download/<string:data_type>', methods=['GET'])
 def unified_download_excel(data_type):
-    # 🔓 1. ULTRA-FLEXIBLE TOKEN SEARCH
-    token = request.args.get('token') or request.args.get('access_token')
-    
-    if not token:
-        auth_header = request.headers.get('Authorization')
-        if auth_header and "Bearer " in auth_header:
-            token = auth_header.split(" ")[1]
-
-    if not token:
-        print("❌ DOWNLOAD ATTEMPT FAILED: No token found in URL or Header")
-        return jsonify({"msg": "Missing Authorization Token"}), 401
-    
-    from flask_jwt_extended import decode_token
     try:
+        # 🛡️ 1. AUTHENTICATION
+        token = request.args.get('token') or request.args.get('access_token')
+        if not token:
+            return jsonify({"error": "No token provided"}), 401
+        
+        from flask_jwt_extended import decode_token
         decoded = decode_token(token)
         user = db.session.get(User, int(decoded['sub']))
-    except Exception:
-        return jsonify({"msg": "Invalid Token"}), 401
 
-    # 🏢 2. DATA PROCESSING
-    target_branch = request.args.get('branch', 'TEST1').strip().upper()
-    is_template = 'template' in data_type 
-    clean_type = data_type.replace('_template', '').replace('_full', '').strip().lower()
-    data, columns = [], []
+        # 🏢 2. CLEANING & SETUP
+        # This turns 'buses_full' or 'buses_template' into just 'buses'
+        clean_type = data_type.lower().replace('_full', '').replace('_template', '').strip()
+        is_template = 'template' in data_type.lower()
+        target_branch = request.args.get('branch', 'ALL').strip().upper()
+        
+        data = []
+        columns = []
 
-    try:
+        print(f"📥 DOWNLOAD REQUEST: Type={clean_type}, Template={is_template}, Branch={target_branch}")
+
         # 🎓 A. STUDENTS
         if clean_type == 'students':
-            records = Student.query.filter_by(branch=target_branch, company_id=user.company_id).all()
-            # ✅ Added 'Zone' to the columns list
+            columns = ['Student Name', 'Admission No', 'Grade', 'Div', 'AM Route', 'Noon Route', 'PM Route', 'Assigned Bus']
+            if not is_template:
+                query = Student.query.filter_by(company_id=user.company_id)
+                if target_branch != "ALL" and target_branch != "ALL BRANCHES":
+                    query = query.filter(db.func.upper(Student.branch) == target_branch)
+                recs = query.all()
+                data = [s.to_dict() for s in recs] # Simplification for example
+
+        # 🚌 B. BUSES (The section causing your error)
+        elif clean_type == 'buses':
             columns = [
-                'Student Name', 'Admission No', 'Grade', 'Div', 'Parent Mobile', 
-                'RFID Tag', 'Zone', 'Pickup Stop', 'Drop Stop', 'Assigned Bus', 'Fee', 'Payment Status'
+                'Bus Number', 'Chassis Number', 'Seater Capacity', 
+                'Morning Route', 'Noon Route', 'Evening Route', 
+                'Lady Attender', 'GPS Device ID', 'SIM No', 'RFID Reader ID', 'Branch'
             ]
             
-            if is_template:
-                data = [{col: "" for col in columns}]
-            else:
-                for r in records:
-                    # 🚀 Fetching the Zone name from the Pickup Stop object
-                    p_stop_obj = db.session.get(BusStop, r.pickup_stop_id) if r.pickup_stop_id else None
-                    d_stop_obj = db.session.get(BusStop, r.drop_stop_id) if r.drop_stop_id else None
-                    bus_obj = db.session.get(Bus, r.bus_id) if r.bus_id else None
+            if not is_template:
+                query = Bus.query.filter_by(company_id=user.company_id)
+                if target_branch != "ALL" and target_branch != "ALL BRANCHES":
+                    query = query.filter(db.func.upper(Bus.branch) == target_branch)
+                recs = query.all()
 
-                    # Get Zone name from the pickup stop
-                    zone_name = p_stop_obj.zone if p_stop_obj else "N/A"
+                for r in recs:
+                    morning_obj = db.session.get(Route, r.morning_route_id) if r.morning_route_id else None
+                    noon_obj = db.session.get(Route, r.noon_route_id) if r.noon_route_id else None
+                    evening_obj = db.session.get(Route, r.evening_route_id) if r.evening_route_id else None
+                    staff_obj = db.session.get(User, r.attender_id) if r.attender_id else None
 
                     data.append({
-                        'Student Name': r.name, 
-                        'Admission No': r.admission_no, 
-                        'Grade': r.grade,
-                        'Div': r.division, # ✅ ADD THIS LINE
-                        'Parent Mobile': r.parent_mobile, 
-                        'RFID Tag': r.rfid_tag,
-                        'Zone': zone_name, # ✅ Now Exporting the Zone
-                        'Pickup Stop': p_stop_obj.stop_name if p_stop_obj else "N/A", 
-                        'Drop Stop': d_stop_obj.stop_name if d_stop_obj else "N/A", 
-                        'Assigned Bus': bus_obj.bus_no if bus_obj else "N/A",
-                        'Fee': r.total_fee, 
-                        'Payment Status': r.payment_status or 'Pending'
+                        'Bus Number': r.bus_no, 'Chassis Number': r.chassis_no, 
+                        'Seater Capacity': r.seater_capacity,
+                        'Morning Route': morning_obj.route_name if morning_obj else "Not Assigned",
+                        'Noon Route': noon_obj.route_name if noon_obj else "Not Assigned",
+                        'Evening Route': evening_obj.route_name if evening_obj else "Not Assigned",
+                        'Lady Attender': staff_obj.username if staff_obj else "Not Assigned",
+                        'GPS Device ID': r.gps_device_id, 'SIM No': r.sim_no, 
+                        'RFID Reader ID': r.rfid_reader_id, 'Branch': r.branch
                     })
 
-        # 🚌 B. BUS FLEET
-        elif clean_type == 'buses':
-            records = Bus.query.filter_by(branch=target_branch, company_id=user.company_id).all()
-            columns = ['Bus Number', 'Chassis No', 'Seater Capacity', 'GPS Device ID', 'SIM No', 'RFID Reader ID']
-            if is_template:
-                data = [{col: "" for col in columns}]
-            else:
-                data = [{
-                    'Bus Number': r.bus_no, 'Chassis No': r.chassis_no, 'Seater Capacity': r.seater_capacity,
-                    'GPS Device ID': r.gps_device_id, 'SIM No': r.sim_no, 'RFID Reader ID': r.rfid_reader_id
-                } for r in records]
-
-# 📍 C. BUS STOPS inside app.py
+        # 📍 C. STOPS
         elif clean_type == 'stops':
-            # 🔍 Look for stops matching the branch and EITHER your company OR no company
-            records = BusStop.query.filter(
-                BusStop.branch.ilike(target_branch.strip()),
-               (BusStop.company_id == user.company_id) | (BusStop.company_id == None)
-            ).all()
-            
             columns = ['Stop Name', 'Zone', 'Distance (KM)', 'Latitude', 'Longitude']
-            
-            if is_template:
-                data = [{col: "" for col in columns}]
-            else:
-                print(f"📊 DOWNLOAD DEBUG: Found {len(records)} stops. Checking for repairs...")
-                
-                for r in records:
-                    # 🛠️ AUTO-REPAIR: If company_id is missing, fix it now!
-                    if r.company_id is None:
-                        print(f"🔧 REPAIRING: Assigning '{r.stop_name}' to company {user.company_id}")
-                        r.company_id = user.company_id
-                    
-                    data.append({
-                        'Stop Name': r.stop_name, 
-                        'Zone': r.zone, 
-                        'Distance (KM)': r.km,
-                        'Latitude': r.latitude or 0.0,
-                        'Longitude': r.longitude or 0.0
-                    })
-                
-                # Save the repairs to the database
-                if records:
-                    db.session.commit()
+            if not is_template:
+                recs = Stop.query.filter_by(company_id=user.company_id).all()
+                data = [{'Stop Name': s.stop_name, 'Zone': s.zone, 'Distance (KM)': s.km} for s in recs]
 
-            # 🛡️ FIX FOR TYPEERROR: Ensure we always return something
-            if not data:
-                return jsonify({"error": "No stops found to download"}), 404
+        # 🛑 SAFETY CHECK: If clean_type matched nothing
+        else:
+            return jsonify({"error": f"Invalid data type: {clean_type}"}), 400
 
-# 🚀 FINAL STEP: Create and send the actual file
+        # 🛡️ 3. FINAL FILE GENERATION
+        if is_template and not data:
+            data = [{col: "" for col in columns}]
+
+        if not data and not is_template:
+            return jsonify({"error": "No data found to export"}), 404
+
+        # Generate the Excel file
         df = pd.DataFrame(data, columns=columns)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1362,11 +1572,12 @@ def unified_download_excel(data_type):
             output, 
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True, 
-            download_name=f"{target_branch}_{data_type}.xlsx"
+            download_name=f"{target_branch}_{clean_type}.xlsx"
         )
 
     except Exception as e:
-        print(f"❌ EXCEL ERROR: {str(e)}")
+        db.session.rollback()
+        print(f"❌ MASTER DOWNLOAD ERROR: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
@@ -1389,48 +1600,70 @@ def get_general_live_location():
 # 👨‍👩‍👧 GET PARENT CHILDREN (Fixed: Sends GPS ID for Tracking)
 @app.route('/api/parent/student_info', methods=['GET'])
 def get_parent_student_info():
-    user_id = request.args.get('user_id')
-    user = db.session.get(User, user_id)
-    
-    if not user or user_id == 'null': # Added safety check for 'null' string
+    user_id_raw = request.args.get('user_id')
+    if not user_id_raw or user_id_raw == 'null':
+        return jsonify({"message": "User ID missing"}), 400
+        
+    user = db.session.get(User, int(user_id_raw))
+    if not user:
         return jsonify({"message": "User not found"}), 404
 
-    # ✅ Use username because your logs show the phone is there
+    # Fetch all students linked to this parent's mobile (username)
     students = Student.query.filter_by(parent_mobile=user.username).all()
     
     results = []
     for s in students:
-        # Use .student_name or .name depending on your Student model
+        # 🕵️‍♂️ FIND THE ATTENDER FOR THIS CHILD'S BUS
+        bus = Bus.query.get(s.bus_id) if s.bus_id else None
+        attender = User.query.get(bus.attender_id) if (bus and bus.attender_id) else None
+
         results.append({
             "id": s.id,
             "student_name": getattr(s, 'student_name', getattr(s, 'name', 'Unknown')),
-            "title": "Annual Transport Fee",
             "admission_no": s.admission_no,
             "grade": s.grade,
-            "branch": s.branch,
             "total_fee": s.total_fee,
             "payment_status": s.payment_status,
+            "last_status": s.last_status or "AT HOME",
             "parent_name": user.username,
-            "last_status": s.last_status or "AT HOME" # ✅ This pulls the real RFID tap status
+            "branch": s.branch,
+            "bus_gps_id": s.bus_id, 
+            "pickup_point": f"Stop ID: {s.pickup_stop_id}" if s.pickup_stop_id else "Not Assigned",
+            "bus_number": bus.bus_no if bus else "Not Assigned",
+            # ✨ ADDED FOR THE CALL BUTTON ✨
+            "attender_name": attender.name if attender else "Not Assigned",
+            "attender_phone": attender.contact_number if attender else None
         })
-        
     return jsonify(results), 200
 
-@app.route('/api/attendance', methods=['GET'])
+@app.route('/api/attendance', methods=['GET', 'OPTIONS'])
+@jwt_required()
 def get_attendance():
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
+    
     try:
-        branch = request.args.get('branch')
-        # ✅ 3. Fix Logic: Handle the 'branch' parameter safely
-        if branch and branch != "All":
-            # Ensure your database model 'AttendanceLog' has a 'branch' column
-            logs = AttendanceLog.query.filter_by(branch=branch).order_by(AttendanceLog.timestamp.desc()).all()
-        else:
-            logs = AttendanceLog.query.order_by(AttendanceLog.timestamp.desc()).all()
-            
+        from sqlalchemy import func, or_
+        user = db.session.get(User, int(get_jwt_identity()))
+        
+        # 🛡️ THE SMART QUERY:
+        # Show logs that match the company_id OR logs that are NULL (old data)
+        query = AttendanceLog.query.filter(
+            or_(
+                AttendanceLog.company_id == user.company_id,
+                AttendanceLog.company_id == None
+            )
+        )
+
+        branch_param = request.args.get('branch', '').strip().upper()
+        if branch_param and branch_param not in ["ALL", "ALL BRANCHES", ""]:
+            query = query.filter(func.upper(AttendanceLog.branch) == branch_param)
+
+        logs = query.order_by(AttendanceLog.timestamp.desc()).limit(100).all()
         return jsonify([log.to_dict() for log in logs]), 200
+
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": "Internal Server Error"}), 500 # 🚀 Prevents 500 crash
+        print(f"❌ Attendance API Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ==========================================
 #  🆔 RFID ATTENDANCE SYSTEM
@@ -1460,81 +1693,47 @@ def receive_rfid_scan():
 
     return jsonify({"message": "Success", "student": student.name, "status": new_status}), 200
 
-# ✅ Use BytesIO for Excel files (binary), not StringIO (text)
-@app.route('/api/attendance/export', methods=['GET'])
-def export_attendance_excel():
+# ==========================================
+# 🎫 RFID / I-CARD TAP HANDLER
+# ==========================================
+@app.route('/api/attendance/tap', methods=['POST'])
+def handle_rfid_tap():
+    data = request.json
+    # 1. Get IDs from the hardware request
+    student_id = data.get('student_id')
+    bus_no = data.get('bus_number')
+    
+    if not student_id:
+        return jsonify({"error": "Missing Student ID"}), 400
+
+    # 🕵️‍♂️ 2. Find the student in the database
+    student = db.session.get(Student, int(student_id))
+    if not student:
+        return jsonify({"error": "Student not found in database"}), 404
+
     try:
-        branch = request.args.get('branch')
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
-
-        # 1. Query the logs
-        query = AttendanceLog.query
-        if branch and branch not in ["All Branches", "All"]:
-            query = query.filter_by(branch=branch)
-
-        if start_date and end_date:
-            query = query.filter(AttendanceLog.timestamp.between(f"{start_date} 00:00:00", f"{end_date} 23:59:59"))
-
-        logs = query.order_by(AttendanceLog.timestamp.desc()).all()
-
-        # 2. Process Data & Calculate Totals
-        data = []
-        boarded_count = 0
-        dropped_count = 0
-
-        for log in logs:
-            status = str(log.status).capitalize()
-            if status == "Boarded": boarded_count += 1
-            if status == "Dropped": dropped_count += 1
-
-            data.append({
-                "Student Name": log.student.name if log.student else "Unknown",
-                "Status": status,
-                "Branch": log.branch,
-                "Location": log.location,
-                "Timestamp": log.timestamp
-            })
-
-        # 3. Create DataFrame with guaranteed headers
-        headers = ["Student Name", "Status", "Branch", "Location", "Timestamp"]
-        df = pd.DataFrame(data, columns=headers)
-
-        # 4. Save to Memory
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Attendance')
-            
-            worksheet = writer.sheets['Attendance']
-            
-            # --- Add Summary Rows at the bottom ---
-            start_row = len(df) + 2
-            worksheet.cell(row=start_row + 1, column=1, value="SUMMARY")
-            worksheet.cell(row=start_row + 2, column=1, value=f"Total Boarded: {boarded_count}")
-            worksheet.cell(row=start_row + 3, column=1, value=f"Total Dropped: {dropped_count}")
-            worksheet.cell(row=start_row + 4, column=1, value=f"Grand Total: {len(df)}")
-
-            # --- Auto-adjust column width ---
-            for idx, col in enumerate(df.columns):
-                series = df[col].astype(str)
-                # Check for empty series to prevent max() error
-                val_len = series.map(len).max() if not series.empty else 0
-                max_len = max(val_len, len(col)) + 2
-                worksheet.column_dimensions[openpyxl.utils.get_column_letter(idx + 1)].width = max_len
-
-        # 🚀 CRITICAL: Move pointer to the start so the file isn't "empty"
-        output.seek(0)
-
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"Attendance_{branch}_{start_date}.xlsx"
+        # 🚀 3. THE MAGIC: "Inherit" data from the student record
+        # This ensures the log is NEVER 'null' for branch or company
+        new_log = AttendanceLog(
+            student_id=student.id,
+            student_name=student.name,
+            status="Boarded", 
+            bus_number=bus_no,
+            branch=student.branch,       # 📍 From Student record
+            company_id=student.company_id, # 🏢 From Student record
+            timestamp=datetime.utcnow()
         )
+        
+        db.session.add(new_log)
+        db.session.commit()
+        
+        print(f"✅ Attendance Logged: {student.name} boarded Bus {bus_no} ({student.branch})")
+        return jsonify({"message": f"Welcome, {student.name}"}), 201
 
     except Exception as e:
-        print(f"❌ Excel Export Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        db.session.rollback()
+        print(f"❌ Tap Error: {e}")
+        return jsonify({"error": "Internal Server Error"}), 500
 
 # ==========================================
 #  🛰️ HARDWARE GPS TRACKING (Fixes 404)
@@ -1650,27 +1849,31 @@ def get_notices():
 
 # 1. Admin Assigns a Fee to a Student
 @app.route('/api/admin/fees/assign', methods=['POST', 'OPTIONS'])
-@jwt_required(optional=True)
+@jwt_required() # Require token
 def secure_assign_fee():
     if request.method == 'OPTIONS':
-        return jsonify({'message': 'CORS OK'}), 200
-    
-    from flask_jwt_extended import verify_jwt_in_request
-    verify_jwt_in_request()
+        return _cors_response()
     
     data = request.json
     try:
+        # Check if student exists
+        student = db.session.get(Student, data['student_id'])
+        if not student:
+            return jsonify({"error": "Student not found"}), 404
+
         new_fee = FeeRecord(
             student_id=data['student_id'],
+            company_id=student.company_id, # 🛡️ Link it to the school!
             title=data['title'],
             amount=float(data['amount']),
-            due_date=data.get('due_date', '2026-03-31'),
+            due_date=data.get('due_date', '2026-04-10'),
             status="Pending"
         )
         db.session.add(new_fee)
         db.session.commit()
         return jsonify({"message": "Fee Assigned Successfully!"}), 201
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
@@ -1783,45 +1986,66 @@ def process_payment(id):
 #  🤖 SMART TRANSPORT ASSIGNMENT (Auto-Fee)
 # ==========================================
 @app.route('/api/admin/assign_transport', methods=['POST'])
+@jwt_required()
 def assign_transport():
+    current_user_id = get_jwt_identity()
+    admin_user = db.session.get(User, int(current_user_id))
+    
     data = request.json
     student_id = data.get('student_id')
-    stop_id = data.get('stop_id') # The ID of the pickup point
+    stop_id = data.get('stop_id') 
 
-    student = Student.query.get(student_id)
-    stop = BusStop.query.get(stop_id)
+    # 🚀 FIX 1: Use 'Stop' (the name of your class), not 'BusStop'
+    student = db.session.get(Student, student_id)
+    stop = db.session.get(Stop, stop_id)
 
     if not student or not stop:
         return jsonify({"error": "Student or Stop not found"}), 404
 
-    # 1. Assign the Stop to the Student
+    # 🕵️ ROLE-BASED SECURITY CHECK
+    # Allow Super Admin, School Admin, and Branch Incharge
+    allowed_roles = ['super_admin', 'admin', 'branch_incharge']
+    if admin_user.role.lower() not in allowed_roles:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # 🔒 Branch Lockdown: Incharge can only edit their own branch
+    if admin_user.role.lower() == 'branch_incharge':
+        if str(student.branch).upper() != str(admin_user.branch_id).upper():
+            return jsonify({"error": "Unauthorized! Student is in a different branch."}), 403
+
+    # 1. ASSIGN STOP
     student.pickup_stop_id = stop_id
     
-    # 2. Find the Zone & Price
-    zone = Zone.query.get(stop.zone_id)
+    # 2. AUTO-LINK BUS (If the stop belongs to a bus)
+    # We look for a bus that has this branch and matches the shift
+    # For now, we link the stop directly if your model supports it
+    
+    # 3. FIX 2: Use 'FeeZone' (the name of your class), not 'Zone'
+    zone = db.session.get(FeeZone, stop.fee_zone_id) if stop.fee_zone_id else None
+    
     if not zone:
-        # If no zone assigned, just save stop but warn user
         db.session.commit()
-        return jsonify({"message": "Stop assigned, but Zone price not found (No Fee Created)"}), 200
+        return jsonify({"message": "Stop assigned, but no Fee Zone price found."}), 200
 
-    # 3. AUTO-CREATE FEE 💰
-    # Check if a transport fee already exists to prevent duplicates
+    # 4. AUTO-CREATE FEE
+    student.total_fee = zone.price
+    student.payment_status = "Pending" 
+
     existing_fee = FeeRecord.query.filter_by(student_id=student.id, title="Transport Fee (Auto)").first()
     
     if not existing_fee:
         new_fee = FeeRecord(
             student_id=student.id,
             title="Transport Fee (Auto)",
-            amount=zone.price,  # 👈 Magic happens here!
-            due_date="2026-06-30", # Default due date
+            amount=zone.price,
+            due_date="2026-06-30",
             status="Pending"
         )
         db.session.add(new_fee)
-        message = f"Stop Assigned & Fee of ₹{zone.price} Auto-Created!"
+        message = f"Success: Transport assigned & Fee of ₹{zone.price} generated."
     else:
-        # Optional: Update the existing fee if price changed
         existing_fee.amount = zone.price
-        message = f"Stop Updated & Fee adjusted to ₹{zone.price}"
+        message = f"Success: Transport updated for {student.name}."
 
     db.session.commit()
     return jsonify({"message": message}), 200
@@ -1833,24 +2057,18 @@ def assign_transport():
 # 1. Get Stops with Prices (Smart KM Check) 🧠
 @app.route('/api/public/stops', methods=['GET'])
 def get_public_stops():
-    stops = BusStop.query.all()
-    zones = Zone.query.all() # Get all zones to compare KM
+    # FIX: Use 'Stop' and 'FeeZone'
+    stops = Stop.query.all()
+    zones = FeeZone.query.all() 
     output = []
     
     for s in stops:
         price = 0
-        
-        # Strategy A: Check explicit link
-        if s.zone_id:
-            zone = Session.get(db.session, Zone, s.zone_id) # Updated for SQLAlchemy 2.0
-            if zone: price = zone.price
-            
-        # Strategy B: If no link, check KM match (The Fix!)
-        if price == 0:
-            for z in zones:
-                if z.min_km <= s.km <= z.max_km:
-                    price = z.price
-                    break
+        # Check by KM match if no explicit link
+        for z in zones:
+            if z.min_km <= s.km <= z.max_km:
+                price = z.price
+                break
         
         output.append({
             "id": s.id,
@@ -1861,32 +2079,6 @@ def get_public_stops():
     return jsonify(output), 200
 
 
-@app.route('/api/parent/my_bus', methods=['GET'])
-@jwt_required()
-def get_parent_bus():
-    user_id = int(get_jwt_identity())
-    
-    # 1. Find the student linked to this parent user
-    student = Student.query.filter_by(parent_id=user_id).first()
-    
-    if not student or not student.bus_id:
-        return jsonify({"error": "No bus assigned to your child yet"}), 404
-
-    # 2. Get the bus location
-    bus = Bus.query.get(student.bus_id)
-    
-    # 3. Return the standard marker format
-    return jsonify({
-        "id": bus.id,
-        "name": bus.bus_no,
-        "lat": bus.last_lat,
-        "lng": bus.last_lng,
-        "status": bus.status,
-        "speed": bus.speed,
-        "driver_name": "Driver Name", # You can link your Driver model here later
-    }), 200
-
-# 2. Parent Selects Stop -> Auto-Generate Fee 💰 (FIXED & SAFER)
 @app.route('/api/parent/select_transport', methods=['POST'])
 def parent_select_transport():
     try:
@@ -1894,30 +2086,36 @@ def parent_select_transport():
         student_id = data.get('student_id')
         stop_id = data.get('stop_id')
 
-        student = Student.query.get(student_id)
-        if not student: 
-            return jsonify({"error": "Student not found"}), 404
+        student = db.session.get(Student, student_id)
+        stop = db.session.get(Stop, stop_id) # Using 'Stop' to match your class name
 
-        stop = BusStop.query.get(stop_id)
-        if not stop:
-            return jsonify({"error": "Stop not found"}), 404
+        if not student or not stop: 
+            return jsonify({"error": "Student or Stop not found"}), 404
 
-        # 1. Assign Stop to Student
-        student.pickup_stop_id = stop_id
+        # 1. 🧠 SMART PRICE CALCULATION
+        # Look for a FeeZone that matches the KM of this stop
+        price = 0.0
+        zones = FeeZone.query.filter_by(company_id=student.company_id).all()
+        for z in zones:
+            if z.min_km <= stop.km <= z.max_km:
+                price = z.price
+                break
         
-        # 2. Set Price (Manually setting ₹20 for your company demo)
-        # In a real system, you would use: price = stop.km * 10 or similar logic
-        price = 20.0 
+        if price == 0:
+            price = 20.0 # Emergency fallback for your demo
 
-        # 3. Create or Update Fee in the FeeRecord table
-        # This matches what your 'ParentPaymentScreen' is looking for
+        # 2. Assign Stop to Student
+        student.pickup_stop_id = stop_id
+        student.total_fee = price
+        student.payment_status = "Pending"
+
+        # 3. Create/Update the FeeRecord
         existing_fee = FeeRecord.query.filter_by(student_id=student.id, title="Annual Transport Fee").first()
         
         if existing_fee:
             if existing_fee.status == "Paid":
-                return jsonify({"error": "Fee already paid! Cannot change stop now."}), 400
+                return jsonify({"error": "Fee already paid! Please contact school to change stops."}), 400
             existing_fee.amount = price 
-            message = f"Stop Updated! Fee updated to ₹{price}."
         else:
             new_fee = FeeRecord(
                 student_id=student.id,
@@ -1927,149 +2125,150 @@ def parent_select_transport():
                 status="Pending"
             )
             db.session.add(new_fee)
-            message = f"Transport Assigned! Fee of ₹{price} generated."
-
-        # ✅ ALSO update the Student table so the Home Screen knows to show the tracking block
-        student.total_fee = price
-        student.payment_status = "Pending"
 
         db.session.commit()
-        return jsonify({"message": message, "fee": price}), 200
+        return jsonify({
+            "message": f"Transport Assigned! Please pay ₹{price} to enable tracking.",
+            "fee": price
+        }), 200
 
     except Exception as e:
-        print(f"🔥 CRASH ERROR: {str(e)}") 
         db.session.rollback()
-        return jsonify({"error": f"Backend Error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# 🏢 BRANCH MANAGEMENT (Multi-Tenant Fix)
+# 🏢 MASTER BRANCH CONTROLLER (SaaS Version)
 # ==========================================
-from flask_jwt_extended import jwt_required, get_jwt_identity
-
 @app.route('/api/branches', methods=['GET', 'POST', 'OPTIONS'])
-@app.route('/api/admin/branches', methods=['GET', 'POST', 'OPTIONS'])
-@jwt_required() # 🛡️ STEP 1: Lock the door so we know who is logged in
-def handle_branches_flexible():
-    if request.method == 'OPTIONS':
-        return jsonify({'message': 'CORS OK'}), 200
-
-    # Get the ID of the person logged in (e.g., testadmin or fleetadmin)
-    current_user_id = get_jwt_identity()
-    user = db.session.get(User, current_user_id)
-
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # ------------------------------------------
-    # 📂 FETCH BRANCHES (GET)
-    # ------------------------------------------
-    if request.method == 'GET':
-        # 🛡️ DATA ISOLATION: 
-        # Only fetch branches where company_id matches the logged-in user's school
-        branches = Branch.query.filter_by(company_id=user.company_id).all()
-        return jsonify([b.to_dict() for b in branches]), 200
-    
-    # ------------------------------------------
-    # 📝 CREATE BRANCH (POST)
-    # ------------------------------------------
-    data = request.json
-    if not data or 'name' not in data:
-        return jsonify({'error': 'Name is required'}), 400
-        
-    # Check if branch exists WITHIN this specific school
-    if Branch.query.filter_by(name=data['name'], company_id=user.company_id).first():
-        return jsonify({'error': 'Branch already exists in your school'}), 400
-        
-    # ✅ Auto-assign the Branch to the user's company_id
-    new_branch = Branch(
-        name=data['name'],
-        latitude=data.get('latitude'), 
-        longitude=data.get('longitude'),
-        company_id=user.company_id # 🚀 THIS STOPS THE LEAKAGE
-    )
-    
-    db.session.add(new_branch)
-    db.session.commit()
-    return jsonify({'message': 'Branch added successfully'}), 201
-
-# Delete route (Also needs protection)
 @app.route('/api/branches/<int:id>', methods=['DELETE', 'OPTIONS'])
-@app.route('/api/admin/branches/<int:id>', methods=['DELETE', 'OPTIONS'])
 @jwt_required()
-def delete_branch_flexible(id):
-    if request.method == 'OPTIONS':
-        return jsonify({'message': 'CORS OK'}), 200
-        
-    current_user_id = get_jwt_identity()
-    user = db.session.get(User, current_user_id)
+def handle_branches_master(id=None):
+    if request.method == 'OPTIONS': 
+        return jsonify({'message': 'OK'}), 200
+
+    user = db.session.get(User, int(get_jwt_identity()))
     
-    # 🛡️ Ensure they can only delete their own branches
-    branch = Branch.query.filter_by(id=id, company_id=user.company_id).first()
-    
-    if not branch: 
-        return jsonify({'error': 'Branch not found or unauthorized'}), 404
+    # 📂 1. FETCH BRANCHES (GET)
+    if request.method == 'GET':
+        # Use our helper to safely handle 'null' or missing IDs
+        target_company = get_safe_id(request.args.get('company_id'))
+
+        if user.role == 'super_admin':
+            if target_company:
+                # 🏫 Mansoor managing a specific school
+                query = Branch.query.filter_by(company_id=target_company)
+            else:
+                # 🌍 Mansoor in Global Mode (shows every branch)
+                query = Branch.query
+        else:
+            # 🔒 Regular Admin/Staff: Locked to their own school
+            query = Branch.query.filter_by(company_id=user.company_id)
+            
+        # Sort A-Z so the dropdown in Flutter looks professional
+        branches = query.order_by(Branch.name.asc()).all()
+        return jsonify([b.to_dict() for b in branches]), 200
+
+    # 📝 2. CREATE BRANCH (POST)
+    if request.method == 'POST':
+        data = request.json
+        name = data.get('name') or data.get('branch_name')
         
-    db.session.delete(branch)
-    db.session.commit()
-    return jsonify({'message': 'Branch deleted'}), 200
+        # Determine company ownership safely
+        raw_cid = data.get('company_id')
+        target_company_id = get_safe_id(raw_cid) if user.role == 'super_admin' else user.company_id
+
+        if not target_company_id or not name:
+            return jsonify({'error': 'Missing branch name or company_id'}), 400
+
+        new_branch = Branch(
+            name=name,
+            latitude=data.get('latitude', 0.0),
+            longitude=data.get('longitude', 0.0),
+            company_id=target_company_id
+        )
+        db.session.add(new_branch)
+        db.session.commit()
+        return jsonify({'message': 'Branch created successfully', 'id': new_branch.id}), 201
+
+    # 🗑️ 3. DELETE BRANCH (DELETE)
+    if request.method == 'DELETE':
+        if not id:
+            return jsonify({'error': 'No branch ID provided'}), 400
+            
+        branch = Branch.query.get(id)
+        if not branch:
+            return jsonify({'error': 'Branch not found'}), 404
+            
+        # Security: Prevent deleting branches from other schools
+        if user.role != 'super_admin' and branch.company_id != user.company_id:
+            return jsonify({'error': 'Unauthorized'}), 403
+            
+        db.session.delete(branch)
+        db.session.commit()
+        return jsonify({'message': 'Branch deleted successfully'}), 200
 
 # ==========================================
-# 🗺️ SECURE ZONE & FEES MANAGEMENT
+# 🗺️ SECURE ZONE & FEES MANAGEMENT (SaaS)
 # ==========================================
 @app.route('/api/admin/zones', methods=['GET', 'POST', 'OPTIONS'])
-@jwt_required(optional=True)
+@jwt_required()
 def manage_zones():
     if request.method == 'OPTIONS': 
         return jsonify({'message': 'CORS OK'}), 200
 
-    from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
-    try:
-        verify_jwt_in_request()
-    except Exception:
-        return jsonify({"error": "Unauthorized access"}), 401
-
     user = db.session.get(User, int(get_jwt_identity()))
-    branch_param = request.args.get('branch')
     
-    # 🔒 Base Filter: Always separate by school
-    query = FeeZone.query.filter_by(company_id=user.company_id)
+    # 🛡️ 1. Determine the School ID (The SaaS Key)
+    raw_cid = request.args.get('company_id')
+    target_cid = get_safe_id(raw_cid)
+    
+    # Final School ID logic
+    final_cid = target_cid if (user.role == 'super_admin' and target_cid) else user.company_id
 
+    # 📂 2. FETCH ZONES (GET)
     if request.method == 'GET':
-        # 🛡️ Use a safe role check
-        user_role = str(user.role).lower().strip()
-        
-        if user_role in ['super_admin', 'admin']:
-            # Admin View: Filter only if a specific branch is selected
-            if branch_param and branch_param not in ["All Branches", "Global", "TEST SCHOOL"]:
-                query = query.filter_by(branch=branch_param.upper())
-        else:
-            # 🏢 Branch Incharge: Look up their branch name
-            # We use globals() to find the Branch class safely
-            BranchModel = globals().get('Branch')
-            if BranchModel:
-                b_obj = db.session.get(BranchModel, user.branch_id)
-                if b_obj:
-                    query = query.filter_by(branch=b_obj.name.upper())
+        from sqlalchemy import func
+        query = FeeZone.query.filter_by(company_id=final_cid)
 
-        zones = query.all()
+        branch_filter = request.args.get('branch', '').strip().upper()
+        
+        # 🚀 THE FIX: Use func.upper for case-insensitive matching
+        if branch_filter and branch_filter not in ["ALL", "ALL BRANCHES", "GLOBAL (ALL BRANCHES)", ""]:
+            query = query.filter(func.upper(FeeZone.branch) == branch_filter)
+
+        zones = query.order_by(FeeZone.zone_name.asc()).all()
         return jsonify([z.to_dict() for z in zones]), 200
 
+    # ➕ 3. ADD ZONE (POST)
     if request.method == 'POST':
         try:
             data = request.json
+            name = data.get('zone_name') or data.get('name')
+            if not name:
+                return jsonify({'error': 'Zone name is required'}), 400
+
+            # Use our safe helper for numbers
+            def safe_float(val):
+                try:
+                    return float(val) if val and str(val).strip() != "" else 0.0
+                except:
+                    return 0.0
+
             new_zone = FeeZone(
-                zone_name=data.get('name'), # This 'name' comes from your Flutter controller
-                min_km=float(data.get('min_km', 0)),
-                max_km=float(data.get('max_km', 0)),
-                price=float(data.get('price', 0)),
-                branch=data.get('branch', '').upper(),
+                zone_name=name,
+                min_km=safe_float(data.get('min_km')),
+                max_km=safe_float(data.get('max_km')),
+                price=safe_float(data.get('price')),
+                branch=str(data.get('branch', 'MAIN')).upper(),
                 term=data.get('term', 'Annual'),
                 mode=data.get('mode', 'Two-Way'),
-                company_id=user.company_id 
+                company_id=final_cid # ✅ Correctly linked to school
             )
+            
             db.session.add(new_zone)
             db.session.commit()
-            return jsonify({'message': 'Zone added successfully'}), 201
+            return jsonify(new_zone.to_dict()), 201
+            
         except Exception as e:
             db.session.rollback()
             return jsonify({'error': str(e)}), 500
@@ -2111,42 +2310,39 @@ def bulk_allot_students():
     try:
         data = request.json
         bus_id = data.get('bus_id')
-        stop_names = data.get('stops') # List of stop names
+        stop_names = data.get('stops')
         branch_name = data.get('branch')
         
-        user = db.session.get(User, int(get_jwt_identity()))
+        # 🏢 THE SaaS FIX: Use the company_id from the JSON if Super Admin, 
+        # otherwise use the user's assigned company.
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
         
-        # 1. Validation: Ensure the bus belongs to this company
-        bus = Bus.query.filter_by(id=bus_id, company_id=user.company_id).first()
-        if not bus:
-            return jsonify({"error": "Bus not found"}), 404
+        target_company_id = data.get('company_id') if user.role == 'super_admin' else user.company_id
 
-        # 2. Find all students belonging to this company AND branch AND these stops
-        query = Student.query.filter_by(company_id=user.company_id)
-        
-        # If it's a specific branch, restrict the search
+        # 1. Validation
+        bus = Bus.query.filter_by(id=bus_id, company_id=target_company_id).first()
+        if not bus:
+            return jsonify({"error": "Bus not found for this school"}), 404
+
+        # 2. Filter students
+        query = Student.query.filter_by(company_id=target_company_id)
         if branch_name and branch_name != "All Branches":
             query = query.filter_by(branch=branch_name.upper())
             
-        # Filter by the list of stops selected
+        # 🚀 MASS UPDATE (Ensure your Student model has 'stop_name' column)
         students_to_update = query.filter(Student.stop_name.in_(stop_names)).all()
 
-        # 3. Mass Update 🚀
         count = 0
         for student in students_to_update:
             student.bus_id = bus_id
             count += 1
             
         db.session.commit()
-        
-        return jsonify({
-            "message": f"Successfully assigned {count} students to Bus {bus.bus_no}",
-            "count": count
-        }), 200
+        return jsonify({"message": f"Successfully assigned {count} students", "count": count}), 200
 
     except Exception as e:
         db.session.rollback()
-        print(f"Bulk Allot Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/fleet')
@@ -2173,22 +2369,19 @@ def get_fleet():
         
     return jsonify([b.to_dict() for b in buses])
 
-@app.route('/api/admin/reports/daily', methods=['GET'])
+@app.route('/api/admin/reports/data', methods=['GET'])
 @jwt_required()
-def get_daily_report():
+def get_daily_reports():
     try:
-        # 1. Get branch from URL
-        branch_from_url = request.args.get('branch', '').strip()
+        from sqlalchemy import func # 👈 Ensure this is imported!
+        branch_from_url = request.args.get('branch', '').strip().upper()
         user = db.session.get(User, int(get_jwt_identity()))
 
-        # 2. Filter by Company (Always!)
         query = Bus.query.filter_by(company_id=user.company_id)
         
-        # 3. Apply Branch Filter 🛡️
-        # If the URL has a branch, use it. 
-        if branch_from_url and branch_from_url.lower() != "all branches":
-            query = query.filter_by(branch=branch_from_url.upper())
-        # 🛑 Removed 'user.branch' check to prevent the AttributeError crash
+        # 🚀 THE FIX: Use func.upper for a bulletproof match
+        if branch_from_url and branch_from_url not in ["ALL", "ALL BRANCHES", ""]:
+            query = query.filter(func.upper(Bus.branch) == branch_from_url)
 
         buses = query.all()
         report = []
@@ -2211,70 +2404,121 @@ def get_daily_report():
         print(f"❌ Daily Report Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/reports/export', methods=['GET'])
-@jwt_required(locations=["headers", "query_string"])
+# ==========================================
+# 🛰️ GPS FLEET STATS EXCEL EXPORT
+# ==========================================
+@app.route('/api/admin/reports/export', methods=['GET']) # 🚀 Matches your Flutter URL
+@jwt_required(locations=["headers", "query_string"]) 
 def export_gps_report():
     try:
-        branch = request.args.get('branch', '').strip()
-        start_date = request.args.get('start_date')
+        from sqlalchemy import func
         user = db.session.get(User, int(get_jwt_identity()))
-
-        query = Bus.query.filter_by(company_id=user.company_id)
-        if branch and branch.lower() != "all branches" and branch != "":
-            query = query.filter_by(branch=branch.upper())
-            filename = f"{branch}_Report.xlsx" if branch else "Global_Fleet_Report.xlsx"
+        
+        # Determine branch filter
+        if user.role.lower() == 'branch_incharge':
+            target_branch = (user.branch_id or "").strip().upper()
         else:
-            filename = "Global_Report.xlsx"
+            target_branch = request.args.get('branch', '').strip().upper()
+
+        # Query the Bus table for fleet stats
+        query = Bus.query.filter_by(company_id=user.company_id)
+        if target_branch and target_branch not in ["ALL BRANCHES", "ALL", ""]:
+            query = query.filter(func.upper(Bus.branch) == target_branch)
 
         buses = query.all()
+        
+        # Create the Excel file
         wb = openpyxl.Workbook()
         ws = wb.active
+        ws.title = "Fleet Travel Report"
         ws.append(["Bus Number", "Branch", "Distance", "Avg Speed", "Max Speed"])
-        
+
         for bus in buses:
-            dist = get_safe_attr(bus, ['total_km', 'km', 'distance', 'mileage'])
+            dist = get_safe_attr(bus, ['total_km', 'km', 'distance'])
             avg = get_safe_attr(bus, ['avg_speed', 'average_speed'])
             mx = get_safe_attr(bus, ['max_speed', 'top_speed'])
-            ws.append([bus.bus_no, bus.branch, f"{dist} km", f"{avg} km/h", f"{mx} km/h"])
+            ws.append([
+                bus.bus_no, 
+                bus.branch or "Main", 
+                f"{dist} km", 
+                f"{avg} km/h", 
+                f"{mx} km/h"
+            ])
 
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
-        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                         as_attachment=True, download_name=filename)
+        
+        return send_file(
+            output, 
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True, 
+            download_name=f"Fleet_Report_{target_branch or 'Global'}.xlsx"
+        )
+
     except Exception as e:
-        print(f"Export Error: {e}")
+        print(f"❌ GPS Export Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/company_branding', methods=['GET'])
-@jwt_required()
-def get_company_branding():
-    user_id = get_jwt_identity()
-    user = db.session.get(User, user_id)
-    
-    # 🛡️ If user belongs to a company, fetch that company specifically
-    if user.company_id:
-        company = db.session.get(Company, user.company_id)
-        if company:
-            return jsonify({
-                "company_name": company.name,
-                "company_logo": company.logo_url or ""
-            }), 200
-            
-    # Fallback for Super Admin
-    return jsonify({
-        "company_name": "Super Admin Control",
-        "company_logo": ""
-    }), 200
+# ==========================================
+# 📊 1. STUDENT ATTENDANCE EXPORT
+# ==========================================
+@app.route('/api/attendance/export', methods=['GET'])
+@jwt_required(locations=["headers", "query_string"])
+def export_attendance_excel():
+    try:
+        from sqlalchemy import func
+        user = db.session.get(User, int(get_jwt_identity()))
+        
+        # Security: Force branch if Incharge
+        if user.role.lower() == 'branch_incharge':
+            branch = (user.branch_id or "").strip().upper()
+        else:
+            branch = request.args.get('branch', '').strip().upper()
+
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+
+        # Query AttendanceLog (Not Bus!)
+        query = AttendanceLog.query.filter_by(company_id=user.company_id)
+        if branch and branch not in ["ALL BRANCHES", "ALL", ""]:
+            query = query.filter(func.upper(AttendanceLog.branch) == branch)
+        if start_date and end_date:
+            query = query.filter(AttendanceLog.timestamp.between(f"{start_date} 00:00:00", f"{end_date} 23:59:59"))
+
+        logs = query.order_by(AttendanceLog.timestamp.desc()).all()
+        data = []
+        for log in logs:
+            # 🚀 THE SMART FALLBACK:
+            # Try the log column first, then the student's record, then 'Main'
+            actual_branch = log.branch or (log.student.branch if log.student else "Main")
+            actual_name = log.student_name or (log.student.name if log.student else "Unknown Student")
+
+            data.append({
+                "Student Name": actual_name,
+                "Status": log.status,
+                "Branch": actual_branch.upper(), # Make it look clean in Excel
+                "Bus": log.bus_number,
+                "Time": log.timestamp[:16] if isinstance(log.timestamp, str) else log.timestamp.strftime('%Y-%m-%d %H:%M')
+            })
+
+        df = pd.DataFrame(data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Attendance')
+        output.seek(0)
+        return send_file(output, as_attachment=True, download_name="Attendance_Report.xlsx")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/companies', methods=['GET', 'POST', 'OPTIONS'])
-@jwt_required(optional=True) # 🛡️ STEP 1: Allow OPTIONS to pass without a token
+@jwt_required(optional=True)
 def handle_companies():
-    # 🚀 2. HANDLE CORS PRE-FLIGHT Handshake
+    # 🚀 1. Handle CORS Pre-flight
     if request.method == 'OPTIONS':
-        return _cors_response()
+        return jsonify({'message': 'OK'}), 200
 
-    # 🚀 3. NOW ENFORCE SECURITY for real data
+    # 🚀 2. Enforce Security
     from flask_jwt_extended import verify_jwt_in_request
     try:
         verify_jwt_in_request()
@@ -2283,22 +2527,21 @@ def handle_companies():
 
     user = db.session.get(User, get_jwt_identity())
     if not user or user.role.lower() not in ['super_admin', 'developer', 'admin']:
-        return jsonify({"error": f"Unauthorized. Your role is {user.role}"}), 403
+        return jsonify({"error": f"Unauthorized"}), 403
 
-    # 📂 4. FETCH CLIENTS (GET)
+    # 📂 3. FETCH CLIENTS (GET)
     if request.method == 'GET':
         if user.role.lower() in ['super_admin', 'developer']:
             companies = Company.query.all()
         else:
-            # 🚀 Client Admin only sees their own record
             companies = Company.query.filter_by(id=user.company_id).all()
         return jsonify([c.to_dict() for c in companies]), 200
 
-    # 📝 5. REGISTER NEW CLIENT (POST)
+    # 📝 4. REGISTER NEW CLIENT (POST)
     if request.method == 'POST':
         try:
             data = request.get_json()
-            if not data.get('name'):
+            if not data or not data.get('name'):
                 return jsonify({"error": "Company name is required"}), 400
 
             new_co = Company(
@@ -2308,7 +2551,8 @@ def handle_companies():
                 phone_number=data.get('phone', ''),
                 bank_name=data.get('bank_name', ''),
                 account_no=data.get('account_no', ''),
-                ifsc_code=data.get('ifsc_code', '')
+                ifsc_code=data.get('ifsc_code', ''),
+                upi_id=data.get('upi_id', '')  # ✨ Now saving UPI
             )
             db.session.add(new_co)
             db.session.commit()
@@ -2319,18 +2563,20 @@ def handle_companies():
 
     return jsonify({"error": "Method not allowed"}), 405
 
-@app.route('/api/admin/companies/<int:id>', methods=['PUT', 'DELETE'])
+
+@app.route('/api/admin/companies/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @jwt_required()
 def handle_single_company(id):
-    user = db.session.get(User, get_jwt_identity())
+    if request.method == 'OPTIONS':
+        return jsonify({'message': 'OK'}), 200
 
-    # 🛡️ Only Super Admins/Developers can Edit or Delete Clients
+    user = db.session.get(User, get_jwt_identity())
     if not user or user.role.lower() not in ['super_admin', 'developer']:
         return jsonify({"error": "Unauthorized"}), 403
 
     company = Company.query.get_or_404(id)
 
-    # ✏️ Update Client Info
+    # ✏️ UPDATE CLIENT (PUT)
     if request.method == 'PUT':
         data = request.get_json()
         
@@ -2341,11 +2587,12 @@ def handle_single_company(id):
         company.bank_name = data.get('bank_name', company.bank_name)
         company.account_no = data.get('account_no', company.account_no)
         company.ifsc_code = data.get('ifsc_code', company.ifsc_code)
+        company.upi_id = data.get('upi_id', company.upi_id)  # ✨ Now updating UPI
 
         db.session.commit()
         return jsonify({"message": f"Updated {company.name} successfully"}), 200
 
-    # 🗑️ Remove Client
+    # 🗑️ REMOVE CLIENT (DELETE)
     if request.method == 'DELETE':
         db.session.delete(company)
         db.session.commit()
@@ -2379,22 +2626,32 @@ def simulate_tap_by_tag(tag, bus_no):
 
 # 🧠 INTERNAL HELPER: This avoids repeating the same logic twice
 def process_tap(student, bus_no):
-    from datetime import datetime
+    # 1. Update Student Status
     new_status = "Boarded" if student.last_status != "Boarded" else "Dropped"
     student.last_status = new_status
     
+    # 2. Assign/Unassign Bus
+    student.current_bus = bus_no if new_status == "Boarded" else None
+    
+    # 3. Log the event
     log = AttendanceLog(
         student_id=student.id,
-        # ❌ Remove student_name=student.name from here
         bus_number=bus_no,
         status=new_status,
-        branch=student.branch,
-        company_id=student.company_id,
-        timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp=datetime.now()
     )
+    
     db.session.add(log)
     db.session.commit()
-    return jsonify({"message": "Success", "student": student.name, "status": new_status}), 201
+    
+    # 🚀 FUTURE: Trigger Push Notification to Parent here!
+    
+    return jsonify({
+        "message": "Success", 
+        "student": student.name, 
+        "status": new_status,
+        "parent_mobile": student.parent_mobile
+    }), 201
 
 @app.route('/api/admin/bus_history/<int:bus_id>', methods=['GET'])
 @jwt_required()
@@ -2406,6 +2663,120 @@ def get_bus_history(bus_id):
     
     points = [{"lat": p.lat, "lng": p.lng} for p in reversed(history)]
     return jsonify(points), 200
+
+# ==========================================
+# 🛣️ UPDATED ROUTE HANDLER (Fixes TypeError)
+# ==========================================
+@app.route('/api/admin/routes', methods=['GET', 'POST', 'OPTIONS'])
+@jwt_required()
+def handle_routes_master():
+    if request.method == 'OPTIONS': return jsonify({'message': 'OK'}), 200
+
+    user = db.session.get(User, int(get_jwt_identity()))
+    is_super = user.role.lower() == 'super_admin'
+    
+    # 🏢 THE MASTER FIX: Determine which company's routes to show
+    raw_cid = request.args.get('company_id')
+    final_cid = get_safe_id(raw_cid) if is_super else user.company_id
+
+    from sqlalchemy import func
+
+    if request.method == 'GET':
+        target_branch_name = request.args.get('branch', '').strip().upper()
+        
+        # 🛡️ Use final_cid here so Super Admins can see the client's routes
+        query = Route.query.filter_by(company_id=final_cid)
+
+        if user.role.lower() == 'branch_incharge':
+            query = query.filter_by(branch_id=user.branch_id)
+        
+        elif target_branch_name and target_branch_name not in ["ALL", "ALL BRANCHES", ""]:
+            # Ensure we look for the branch within the correct company
+            branch_obj = Branch.query.filter_by(company_id=final_cid).filter(func.upper(Branch.name) == target_branch_name).first()
+            if branch_obj:
+                query = query.filter(Route.branch_id == branch_obj.id)
+            else:
+                return jsonify([]), 200
+
+        routes = query.all()
+        return jsonify([r.to_dict() for r in routes]), 200
+
+    if request.method == 'POST':
+        data = request.json
+        branch_name = data.get('branch', '').strip().upper()
+        target_branch_id = None
+
+        if user.role.lower() == 'branch_incharge':
+            target_branch_id = user.branch_id
+        elif branch_name and branch_name not in ["ALL", "ALL BRANCHES", ""]:
+            b_obj = Branch.query.filter_by(company_id=final_cid).filter(func.upper(Branch.name) == branch_name).first()
+            if b_obj: target_branch_id = b_obj.id
+
+        try:
+            new_route = Route(
+                route_name=data.get('route_name'),
+                shift=data.get('shift'), 
+                company_id=final_cid, # 👈 Fix: Save to the correct client
+                branch_id=target_branch_id,
+                stop_ids=data.get('stop_ids')
+            )
+            db.session.add(new_route)
+            db.session.commit()
+            return jsonify(new_route.to_dict()), 201
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+# ==========================================
+# 🚌 UPDATED BUS TO_DICT (Harmonized Keys)
+# ==========================================
+# Inside your Bus class...
+def to_dict(self):
+    return {
+        "id": self.id,
+        "bus_number": self.bus_no,
+        "chassis_no": self.chassis_no or "N/A",
+        "seater_capacity": self.seater_capacity or 0,
+        "gps_device_id": self.gps_device_id or "N/A",
+        "sim_no": self.sim_no or "N/A",
+        "rfid_reader_id": self.rfid_reader_id or "N/A", # 👈 Changed from "rfid" to match Flutter
+        "branch": self.branch,
+        "morning_route_name": self.morning_route.route_name if self.morning_route else "Not Assigned",
+        "noon_route_name": self.noon_route.route_name if self.noon_route else "Not Assigned",
+        "evening_route_name": self.evening_route.route_name if self.evening_route else "Not Assigned",
+        "morning_route_id": self.morning_route_id,
+        "noon_route_id": self.noon_route_id,
+        "evening_route_id": self.evening_route_id,
+        "attender_id": self.attender_id,
+        "attender_name": self.attender.username if self.attender else "Not Assigned"
+    }
+
+@app.route('/api/admin/routes/<int:id>', methods=['DELETE', 'PUT', 'OPTIONS'])
+@jwt_required()
+def handle_route_item(id):
+    if request.method == 'OPTIONS': 
+        return jsonify({'message': 'OK'}), 200
+
+    route = db.session.get(Route, id)
+    if not route:
+        return jsonify({"error": "Route not found"}), 404
+
+    # 🛡️ SaaS Security: Ensure user only deletes their own company's routes
+    user = db.session.get(User, int(get_jwt_identity()))
+    if user.role != 'super_admin' and route.company_id != user.company_id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    if request.method == 'DELETE':
+        db.session.delete(route)
+        db.session.commit()
+        return jsonify({"message": "Route deleted successfully"}), 200
+
+    if request.method == 'PUT':
+        data = request.json
+        route.route_name = data.get('route_name', route.route_name)
+        route.shift = data.get('shift', route.shift)
+        db.session.commit()
+        return jsonify(route.to_dict()), 200
 
 @app.route('/api/debug/promote_admin')
 def promote_admin():
@@ -2445,6 +2816,94 @@ def debug_show_all_buses():
         })
     return jsonify(results)
 
+@app.route('/api/admin/route_coordinates', methods=['GET'])
+@jwt_required()
+def get_route_coordinates():
+    try:
+        user = db.session.get(User, int(get_jwt_identity()))
+        branch_param = request.args.get('branch', '').strip().upper()
+        
+        # 🚀 THE FIX: We must sort by KM as a NUMBER (Float), not Text.
+        # This ensures the line goes: 1.5km -> 2.3km -> 2.4km -> 4.0km
+        stops = Stop.query.filter_by(
+            company_id=user.company_id, 
+            branch=branch_param
+        ).order_by(cast(Stop.km, Float).asc()).all()
+
+        coordinates = []
+        for s in stops:
+            if s.latitude and s.longitude:
+                coordinates.append({
+                    "lat": float(s.latitude),
+                    "lng": float(s.longitude)
+                })
+
+        return jsonify(coordinates), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 🏫 FIX: Fetching Students for Fee Assignment
+@app.route('/api/admin/students', methods=['GET', 'OPTIONS'])
+@jwt_required()
+def get_admin_students():
+    if request.method == 'OPTIONS': 
+        return _cors_response()
+
+    try:
+        user_id = get_jwt_identity()
+        user = db.session.get(User, user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 401
+
+        # 🚀 1. Get the branch name from the URL (?branch=testone)
+        branch_filter = request.args.get('branch')
+        
+        query = Student.query
+        
+        # 🛡️ 2. Apply Security Filters
+        if user.role == 'branch_incharge':
+            # Branch Incharges can ONLY see their own school's students
+            # and we filter by the branch name passed from Flutter
+            query = query.filter(
+                Student.company_id == user.company_id,
+                Student.branch.ilike(branch_filter) if branch_filter else Student.branch != None
+            )
+        elif user.role == 'admin':
+            # School Admins see the whole school
+            query = query.filter_by(company_id=user.company_id)
+            if branch_filter and branch_filter != "All Branches":
+                query = query.filter(Student.branch.ilike(branch_filter))
+        
+        # Super Admins see everything
+        elif user.role in ['super_admin', 'developer']:
+            if branch_filter and branch_filter != "All Branches":
+                query = query.filter(Student.branch.ilike(branch_filter))
+
+        students = query.all()
+        return jsonify([s.to_dict() for s in students]), 200
+
+    except Exception as e:
+        # This will now print the REAL error if it happens again
+        print(f"❌ SERVER ERROR: {str(e)}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+# 🏢 FIX: Branding Route (Fixes the Net::ERR_FAILED)
+@app.route('/api/admin/company_branding', methods=['GET', 'OPTIONS'])
+def get_branding():
+    # ✨ CRITICAL: Handle the browser's "OPTIONS" handshake
+    if request.method == 'OPTIONS':
+        return _cors_response()
+
+    # Get company_id from URL or default to 1
+    company_id = request.args.get('company_id', 1)
+    company = db.session.get(Company, company_id)
+    
+    if not company:
+        return jsonify({"company_name": "FleetTrack Pro", "upi_id": "", "bank_details": {}}), 200
+        
+    return jsonify(company.to_dict()), 200
+
 @app.route('/api/debug/check_stops')
 def debug_stops():
     stops = BusStop.query.all()
@@ -2471,6 +2930,15 @@ def auto_move_bus():
             print("🚀 SEED SUCCESS: Global Super Admin Created")
      except Exception as e:
         print(f"❌ STARTUP ERROR: {e}")
+
+# Create this helper at the top of app.py
+def get_safe_id(val):
+    if val is None or str(val).lower() in ['null', 'none', '']:
+        return None
+    try:
+        return int(val)
+    except:
+        return None
 
 # ==========================================
 # 🚀 STARTUP, TABLE CREATION & ADMIN SEEDING

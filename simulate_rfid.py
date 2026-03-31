@@ -1,17 +1,18 @@
 import requests
 
-# 🔗 Your local backend URL
-URL = "http://127.0.0.1:5000/api/hardware/rfid"
+# 📝 Using your specific tag
+STUDENT_TAG = "CARD123" 
+BUS_NO = "KA05AP1124" # Or any bus that is currently moving
+BASE_URL = "http://127.0.0.1:5000/api/simulate/tap/tag"
 
-# 🎒 Enter an RFID tag that exists in your database
-test_tag = input("Enter Student RFID Tag to simulate scan: ")
+print(f"📇 Simulating Tap for {STUDENT_TAG} on Bus {BUS_NO}...")
 
 try:
-    response = requests.post(URL, json={"rfid_tag": test_tag})
-    if response.status_code == 200:
-        data = response.json()
-        print(f"🔔 SUCCESS: Student {data['student']} is now {data['status']}")
+    response = requests.get(f"{BASE_URL}/{STUDENT_TAG}/{BUS_NO}")
+    if response.status_code == 201:
+        print(f"✅ SUCCESS: Student {STUDENT_TAG} is now on the bus!")
+        print("📍 OPEN FLUTTER: The Student Icon should appear now.")
     else:
-        print(f"❌ ERROR: {response.json().get('error', 'Unknown error')}")
+        print(f"⚠️ Error: {response.text}")
 except Exception as e:
-    print(f"🔥 CONNECTION FAILED: {e}")
+    print(f"❌ Connection Error: {e}")
