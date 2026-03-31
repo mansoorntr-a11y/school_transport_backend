@@ -92,12 +92,7 @@ app.config["JWT_QUERY_STRING_NAME"] = "token"
 # ==========================================
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
-CORS(app, resources={r"/api/*": {
-    "origins": [
-        "https://fleettrackpro-7017f.web.app", 
-        "https://fleettrackpro-7017f.firebaseapp.com"
-    ]
-}})
+CORS(app, resources={r"/api/*": {"origins": "https://fleettrackpro-7017f.web.app"}})
 
 # ==========================================
 # 🚀 4. HELPER FUNCTIONS
