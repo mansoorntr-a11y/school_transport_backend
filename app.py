@@ -2904,6 +2904,14 @@ def get_branding():
         
     return jsonify(company.to_dict()), 200
 
+@app.route('/api/version', methods=['GET'])
+def get_version():
+    return jsonify({
+        "status": "online",
+        "version": "1.0.0",
+        "message": "FleetTrackPro Backend is Live"
+    }), 200
+
 @app.route('/api/debug/check_stops')
 def debug_stops():
     stops = BusStop.query.all()
