@@ -16,6 +16,25 @@ import openpyxl
 import sqlite3
 import threading
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+import json
+
+# ==========================================
+# 🚀 FIREBASE INITIALIZATION
+# ==========================================
+firebase_key = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY')
+
+if firebase_key:
+    # Parse the JSON string from Render's Environment Variables
+    cred_dict = json.loads(firebase_key)
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
+    fb_db = firestore.client()
+    print("✅ Firebase Cloud connected!")
+else:
+    print("⚠️ Firebase Key not found. Running without Cloud DB.")
+
 # 🚀 RUN THIS ONCE TO PATCH YOUR DATABASE WITHOUT DELETING IT
 def patch_database():
     try:
@@ -2909,10 +2928,15 @@ def debug_stops():
     stops = BusStop.query.all()
     return jsonify([{"name": s.stop_name, "branch_in_db": f"'{s.branch}'"} for s in stops])
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health_check():
-    # This route doesn't use the DB, so it should be lightning fast
-    return {"status": "ok", "cors": "enabled"}, 200
+    return jsonify({
+        "status": "online",
+        "backend": "Python/Flask",
+        "database": "SQLite (Local)",
+        "cloud": "Firebase Connected" if firebase_key else "Firebase Missing",
+        "cors": "enabled"
+    }), 200
 
 # ==========================================
 # 🚀 LIVE BUS SIMULATION (Add this at the bottom)
