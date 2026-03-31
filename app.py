@@ -91,7 +91,7 @@ app.config["JWT_QUERY_STRING_NAME"] = "token"
 # ==========================================
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # ==========================================
 # 🚀 4. HELPER FUNCTIONS
