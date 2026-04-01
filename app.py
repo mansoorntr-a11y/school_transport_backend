@@ -20,20 +20,34 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import json
 
+
 # ==========================================
-# 🚀 FIREBASE INITIALIZATION
+# 🚀 SMART FIREBASE INITIALIZATION
 # ==========================================
 firebase_key = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY')
 
-if firebase_key:
-    # Parse the JSON string from Render's Environment Variables
-    cred_dict = json.loads(firebase_key)
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
+try:
+    if firebase_key:
+        # This part runs on RENDER (Cloud)
+        cred_dict = json.loads(firebase_key)
+        cred = credentials.Certificate(cred_dict)
+        print("☁️ Using Render Cloud Firebase Key")
+    else:
+        # This part runs on your LAPTOP (Local)
+        # It looks for the file you just renamed
+        cred = credentials.Certificate('serviceAccountKey.json')
+        print("💻 Using Local serviceAccountKey.json")
+
+    # Initialize ONLY if not already initialized
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    
     fb_db = firestore.client()
     print("✅ Firebase Cloud connected!")
-else:
-    print("⚠️ Firebase Key not found. Running without Cloud DB.")
+
+except Exception as e:
+    print(f"⚠️ Firebase Initialization failed: {e}")
+    fb_db = None
 
 # 🚀 RUN THIS ONCE TO PATCH YOUR DATABASE WITHOUT DELETING IT
 def patch_database():
@@ -88,27 +102,41 @@ if uri and uri.startswith("postgres://"):
 basedir = os.path.abspath(os.path.dirname(__file__))
 db_path = os.path.join(basedir, 'instance', 'v4_transport.db')
 
-# ✅ THE SMART WAY: 
-# If DATABASE_URL is found (on Render), use it.
-# Otherwise, use the absolute path to your repaired local database.
-app.config['SQLALCHEMY_DATABASE_URI'] = uri or f'sqlite:///{db_path}'
+# ==========================================
+# 🚀 1. DATABASE CONFIGURATION
+# ==========================================
+# Use the EXTERNAL URL from your Render Dashboard
+RENDER_DB = "postgresql://school_transport_db_bq52_user:teywdg2RlIx8TBIVJ5Vs0Ud2fiZNXwRR@dpg-d6t6iop5pdvs73bi4cag-a.oregon-postgres.render.com/school_transport_db_bq52"
+
+if os.environ.get('DATABASE_URL'):
+    # Render provides 'postgres://', SQLAlchemy needs 'postgresql://'
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace("postgres://", "postgresql://", 1)
+    print("🚀 RUNNING ON RENDER CLOUD")
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = RENDER_DB
+    print("🌐 LOCAL DEV: CONNECTED TO RENDER POSTGRES")
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-123')
-app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY') # 👈 Use the live key
-
-# 🚀 ADD THESE TWO LINES TO ALLOW EXCEL DOWNLOADS:
-app.config["JWT_TOKEN_LOCATION"] = ["headers", "query_string"]
-app.config["JWT_QUERY_STRING_NAME"] = "token"
-
-# ✅ REMOVED THE REDUNDANT 'db = SQLAlchemy(app)' HERE
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'your-secret-key')
 
 # ==========================================
-# 🚀 2. INITIALIZE PLUGINS (ONLY ONCE!)
+# 🚀 2. INITIALIZE PLUGINS (MUST HAPPEN BEFORE VERIFICATION)
 # ==========================================
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# ==========================================
+# 🚀 3. VERIFY CONNECTION (NOW 'db' EXISTS!)
+# ==========================================
+from sqlalchemy import text # Ensure this is imported at the top of your file
+with app.app_context():
+    try:
+        db.session.execute(text('SELECT 1'))
+        print("✅ DATABASE CONNECTION VERIFIED: CLOUD IS LIVE")
+    except Exception as e:
+        print(f"❌ DATABASE CONNECTION FAILED: {e}")
 
 # ==========================================
 # 🚀 4. HELPER FUNCTIONS
@@ -172,19 +200,18 @@ class Company(db.Model):
     # 🛑 REMOVED the 'users = db.relationship' line from here!
 
     def to_dict(self):
-        return {
-            "id": self.id,
-            "company_name": self.name,
-            "upi_id": self.upi_id,
-            "company_logo": self.logo_url,
-            "address": self.address,
-            "phone": self.phone_number,
-            "bank_details": {
-                "bank": self.bank_name,
-                "account": self.account_no,
-                "ifsc": self.ifsc_code
-            }
-        }
+      return {
+        "id": self.id,
+        "name": self.name,             # Match Flutter 'name'
+        "logo_url": self.logo_url,     # Match Flutter 'logo_url'
+        "address": self.address,
+        "phone": self.phone_number,    # Match Flutter 'phone'
+        "upi_id": self.upi_id,         # Match Flutter 'upi_id'
+        "bank_name": self.bank_name,   # Match Flutter 'bank_name'
+        "account_no": self.account_no, # Match Flutter 'account_no'
+        "ifsc_code": self.ifsc_code    # Match Flutter 'ifsc_code'
+    }
+
 
 class Branch(db.Model):
     __tablename__ = 'branches'
@@ -519,29 +546,35 @@ def handle_admin_users():
     current_user_id = get_jwt_identity()
     admin_user = db.session.get(User, int(current_user_id))
 
-    if not admin_user or admin_user.role.lower() not in ['super_admin', 'admin']:
+    # 🛡️ 1. THE SECURITY GUARD: Check if the role is allowed
+    # We include 'school_admin' (testadmin) and 'admin' (regular school admin)
+    allowed_roles = ['super_admin', 'school_admin', 'admin']
+    
+    if not admin_user or admin_user.role.lower() not in allowed_roles:
+        print(f"🚫 Access Denied for role: {admin_user.role if admin_user else 'None'}")
         return jsonify({"error": "Unauthorized"}), 403
 
+    # ✍️ 2. POST LOGIC: Creating a new user
     if request.method == 'POST':
         try:
             data = request.json
             if User.query.filter_by(username=data.get('username')).first():
                 return jsonify({"error": "Username already exists"}), 400
 
-            # 🚀 THE FIX: Determine which company this user belongs to
-            # If Mansoor (super_admin) is creating, take company_id from the JSON data
-            # If a School Admin is creating, force it to THEIR company_id
+            # Determine company isolation
             if admin_user.role == 'super_admin':
                 target_company_id = data.get('company_id') 
             else:
                 target_company_id = admin_user.company_id
 
             new_user = User(
+                name=data.get('name'), # Ensure 'name' is being sent from Flutter
                 username=data.get('username'),
                 password_hash=generate_password_hash(data.get('password', '1234')),
                 role=data.get('role', 'admin'),
-                company_id=target_company_id, # 🛡️ Now correctly assigned!
-                branch_id=data.get('branch_id')
+                company_id=target_company_id,
+                branch_id=data.get('branch_id'),
+                contact_number=data.get('contact_number')
             )
             
             db.session.add(new_user)
@@ -552,12 +585,16 @@ def handle_admin_users():
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
-    # 📂 GET Logic: Isolation Check
+    # 📂 3. GET LOGIC: Fetching the list
     if admin_user.role == 'super_admin':
-        # Super Admin sees EVERYONE in the system
-        users = User.query.all()
+        # Super Admin can filter by company_id in URL or see everyone
+        cid = request.args.get('company_id')
+        if cid:
+            users = User.query.filter_by(company_id=cid).all()
+        else:
+            users = User.query.all()
     else:
-        # School Admin ONLY sees users from their school
+        # School Admin (testadmin) ONLY sees users from their own school
         users = User.query.filter_by(company_id=admin_user.company_id).all()
         
     return jsonify([u.to_dict() for u in users]), 200
@@ -582,23 +619,24 @@ def delete_admin_user(user_id):
         return jsonify({"error": "You cannot delete your own account!"}), 400
 
     # B. Permission Check
-    if current_user.role == 'super_admin':
+    if admin_user.role == 'super_admin':
         # Super Admin can delete anyone
         pass 
-    elif current_user.role == 'admin' and current_user.company_id == target_user.company_id:
+    elif admin_user.role in ['admin', 'school_admin'] and admin_user.company_id == target_user.company_id:
         # School Admin can only delete users in their own school
         pass
     else:
-        return jsonify({"error": "Unauthorized to delete this user"}), 403
+        return jsonify({"error": "Unauthorized"}), 403
 
+    # This 'try' block must be at the same level as the 'if'
     try:
         db.session.delete(target_user)
         db.session.commit()
-        print(f"🗑️ User {target_user.username} deleted by {current_user.username}")
+        print(f"🗑️ User {target_user.username} deleted by {admin_user.username}")
         return jsonify({"message": "User deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500    
+        return jsonify({"error": str(e)}), 500
 
 # ==========================================
 # 🎓 FIXED STUDENT CONTROLLER
@@ -2589,19 +2627,25 @@ def handle_single_company(id):
 
     # ✏️ UPDATE CLIENT (PUT)
     if request.method == 'PUT':
-        data = request.get_json()
-        
-        company.name = data.get('name', company.name)
-        company.address = data.get('address', company.address)
-        company.phone_number = data.get('phone', company.phone_number)
-        company.logo_url = data.get('logo_url', company.logo_url)
-        company.bank_name = data.get('bank_name', company.bank_name)
-        company.account_no = data.get('account_no', company.account_no)
-        company.ifsc_code = data.get('ifsc_code', company.ifsc_code)
-        company.upi_id = data.get('upi_id', company.upi_id)  # ✨ Now updating UPI
+     data = request.get_json()
+    
+    # Python looks for what Flutter sends in _saveChanges
+    company.name = data.get('name', company.name)
+    company.address = data.get('address', company.address)
+    company.phone_number = data.get('phone', company.phone_number)
+    company.logo_url = data.get('logo_url', company.logo_url)
+    
+    # Match these to your Flutter's "bank_name", "account_no", etc.
+    company.bank_name = data.get('bank_name', company.bank_name)
+    company.account_no = data.get('account_no', company.account_no)
+    company.ifsc_code = data.get('ifsc_code', company.ifsc_code)
+    company.upi_id = data.get('upi_id', company.upi_id)
 
-        db.session.commit()
-        return jsonify({"message": f"Updated {company.name} successfully"}), 200
+    print(f"📥 UPDATING DB: Bank={company.bank_name}, UPI={company.upi_id}")
+
+    db.session.commit()
+    return jsonify({"message": "Success"}), 200
+    return jsonify({"message": "Updated successfully"}), 200
 
     # 🗑️ REMOVE CLIENT (DELETE)
     if request.method == 'DELETE':
