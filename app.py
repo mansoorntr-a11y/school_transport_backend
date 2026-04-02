@@ -1,6 +1,6 @@
+from sqlalchemy import func
 from sqlalchemy import cast, Float # 👈 MAKE SURE THIS IS AT THE TOP OF app.py
 from flask import Flask, jsonify, request, send_file
-from sqlalchemy import func
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -450,32 +450,31 @@ class BusHistory(db.Model):
     # Relationship to easily find the bus
     bus = db.relationship('Bus', backref=db.backref('history', lazy=True))
 
-def calculate_student_fee(stop_name, company_id):
-    """
-    Finds the correct fee based on a stop name and the school's fee zones.
-    """
-    # 1. Find the stop to get the distance (KM)
-    stop = Stop.query.filter_by(name=stop_name, company_id=company_id).first()
+def calculate_student_fee(stop_name, branch_name, company_id):
+    # Use the branch_name and company_id passed into the function
+    stop = Stop.query.filter(
+        func.lower(Stop.stop_name) == stop_name.lower(),
+        func.lower(Stop.branch) == branch_name.lower(),
+        Stop.company_id == company_id
+    ).first()
     
     if not stop:
-        print(f"⚠️ Stop '{stop_name}' not found. Defaulting fee to 0.")
+        print(f"⚠️ Stop '{stop_name}' not found in branch '{branch}'. Fee: 0")
         return 0.0
 
-    distance = stop.distance or 0.0
+    # 🚀 Use .km (because that is what you used in smart_bulk_upload)
+    distance_val = stop.km or 0.0
 
     # 2. Find which FeeZone this distance falls into
-    # We look for: min_km <= distance <= max_km
     zone = FeeZone.query.filter(
         FeeZone.company_id == company_id,
-        FeeZone.min_km <= distance,
-        FeeZone.max_km >= distance
+        FeeZone.min_km <= distance_val,
+        FeeZone.max_km >= distance_val
     ).first()
 
     if zone:
-        print(f"✅ Match: Stop {stop_name} ({distance}km) -> {zone.zone_name} @ ₹{zone.price}")
-        return zone.price
+        return float(zone.price)
     
-    print(f"⚠️ No fee zone covers {distance}km. Defaulting fee to 0.")
     return 0.0
 
 class Route(db.Model):
@@ -935,7 +934,9 @@ def bulk_delete_buses():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500          
-        
+    
+
+from sqlalchemy import func        
 # ==========================================
 # 📂 SMART BULK UPLOAD (Hardened & Corrected)
 # ==========================================
@@ -950,6 +951,9 @@ def smart_bulk_upload():
     # 🚀 We use the branch name passed from the Flutter dropdown (e.g., "TESTONE")
     form_branch = request.form.get('branch', '').strip().upper() 
     
+    if not form_branch or form_branch == "ALL BRANCHES":
+        return jsonify({"error": "A valid Branch Name is required for bulk upload"}), 400
+
     if not file:
         return jsonify({"error": "No file provided"}), 400
 
@@ -968,40 +972,38 @@ def smart_bulk_upload():
         df.columns = df.columns.str.strip() # Remove accidental spaces in headers
         count = 0
 
-        # 📍 1. BUS STOPS (Hardened with Trace Logging)
+# 📍 1. BUS STOPS
         if "stop" in raw_cat:
             print(f"📡 BULK STOP START: Branch={form_branch} | CoID={user.company_id}")
             for index, row in df.iterrows():
-                # Clean Stop Name
+                # 🚀 EVERYTHING BELOW MUST BE INDENTED 1 LEVEL MORE THAN THE 'FOR'
                 name_raw = row.get('Stop Name')
                 stop_name = str(name_raw).strip() if name_raw and not pd.isna(name_raw) else None
-                if not stop_name or stop_name.lower() == 'nan': continue
                 
-                # Clean Data
+                if not stop_name or stop_name.lower() == 'nan': 
+                    continue
+                
                 z_name = str(row.get('Zone') or 'General').strip()
                 km_val = safe_float(row.get('Distance (KM)'))
                 lat_val = safe_float(row.get('Latitude'))
                 lng_val = safe_float(row.get('Longitude'))
 
-                # 🔍 Check if stop exists (Matching EXACTLY by name, branch, and company)
-                stop = Stop.query.filter_by(
-                    stop_name=stop_name, 
-                    branch=form_branch, 
-                    company_id=user.company_id
+                # 🔍 Case-Insensitive Match
+                stop = Stop.query.filter(
+                    func.lower(Stop.stop_name) == stop_name.lower(),
+                    func.lower(Stop.branch) == form_branch.lower(),
+                    Stop.company_id == user.company_id
                 ).first()
                 
                 if stop:
-                    print(f"🔄 Row {index}: UPDATING {stop_name}")
                     stop.km, stop.latitude, stop.longitude, stop.zone = km_val, lat_val, lng_val, z_name
-                    stop.branch = form_branch # 🚀 Ensure branch is forced to the current one
                 else:
-                    print(f"✨ Row {index}: CREATING NEW {stop_name}")
                     db.session.add(Stop(
                         stop_name=stop_name, zone=z_name, branch=form_branch, 
                         company_id=user.company_id, km=km_val, 
                         latitude=lat_val, longitude=lng_val
                     ))
-                count += 1
+                count += 1 # 🚀 Indent this so it counts every row
 
         # 🎓 2. STUDENTS
         elif "student" in raw_cat:
