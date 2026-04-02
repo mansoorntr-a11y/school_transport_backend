@@ -937,91 +937,93 @@ def bulk_delete_buses():
         return jsonify({"error": str(e)}), 500          
         
 # ==========================================
-# 📂 SMART BULK UPLOAD (Expanded for SaaS)
+# 📂 SMART BULK UPLOAD (Hardened & Corrected)
 # ==========================================
 @app.route('/api/admin/upload/bulk', methods=['POST'])
 @jwt_required()
 def smart_bulk_upload():
-    user = db.session.get(User, int(get_jwt_identity()))
+    current_user_id = get_jwt_identity()
+    user = db.session.get(User, int(current_user_id))
+    
     file = request.files.get('file')
     raw_cat = (request.form.get('category') or '').lower().strip()
+    # 🚀 We use the branch name passed from the Flutter dropdown (e.g., "TESTONE")
     form_branch = request.form.get('branch', '').strip().upper() 
     
     if not file:
         return jsonify({"error": "No file provided"}), 400
 
+    # 🛡️ Helper: Prevents crashes on empty numeric cells
+    def safe_float(val, default=0.0):
+        try:
+            if val is None or pd.isna(val) or str(val).strip() == '': 
+                return default
+            return float(str(val).replace(',', '').strip())
+        except:
+            return default
+
     try:
         # Read file safely
         df = pd.read_excel(file, dtype=str) if file.filename.endswith('.xlsx') else pd.read_csv(file, dtype=str)
-        df.columns = df.columns.str.strip() # Remove spaces from headers
+        df.columns = df.columns.str.strip() # Remove accidental spaces in headers
         count = 0
 
-        # 📍 1. BUS STOPS (Fixed Model Name: Stop)
+        # 📍 1. BUS STOPS
         if "stop" in raw_cat:
             for _, row in df.iterrows():
                 stop_name = str(row.get('Stop Name') or '').strip()
                 if not stop_name: continue
                 
-                z_name = str(row.get('Zone', 'General')).strip()
-                km_val = float(row.get('Distance (KM)', 0.0))
-                lat_val = float(row.get('Latitude', 0.0))
-                lng_val = float(row.get('Longitude', 0.0))
+                km_val = safe_float(row.get('Distance (KM)'))
+                lat_val = safe_float(row.get('Latitude'))
+                lng_val = safe_float(row.get('Longitude'))
+                z_name = str(row.get('Zone') or 'General').strip()
                 
-                # 🚀 FIXED: Changed 'BusStop' to 'Stop' to match your model
                 stop = Stop.query.filter_by(stop_name=stop_name, branch=form_branch, company_id=user.company_id).first()
                 
                 if stop:
-                    stop.km = km_val
-                    stop.latitude = lat_val
-                    stop.longitude = lng_val
-                    stop.zone = z_name
+                    stop.km, stop.latitude, stop.longitude, stop.zone = km_val, lat_val, lng_val, z_name
                 else:
                     db.session.add(Stop(
-                        stop_name=stop_name, 
-                        zone=z_name, 
-                        branch=form_branch, 
-                        company_id=user.company_id, 
-                        km=km_val,
-                        latitude=lat_val, 
-                        longitude=lng_val
+                        stop_name=stop_name, zone=z_name, branch=form_branch, 
+                        company_id=user.company_id, km=km_val, latitude=lat_val, longitude=lng_val
                     ))
                 count += 1
 
-        # 🎓 2. STUDENTS (Handles Multi-Shift Routes)
+        # 🎓 2. STUDENTS
         elif "student" in raw_cat:
             for _, row in df.iterrows():
                 name = str(row.get('Student Name') or '').strip()
                 adm_no = str(row.get('Admission No') or '').strip()
                 if not adm_no or not name: continue
 
-                # 🛡️ Force the student to belong to the logged-in user's company and branch
                 student = Student.query.filter_by(admission_no=adm_no, company_id=user.company_id).first()
                 
-                # Lookups
+                # Lookup Routes by Name
                 am_r = Route.query.filter_by(route_name=str(row.get('AM Route','')).strip(), shift='Morning', company_id=user.company_id).first()
                 noon_r = Route.query.filter_by(route_name=str(row.get('Noon Route','')).strip(), shift='Noon', company_id=user.company_id).first()
                 pm_r = Route.query.filter_by(route_name=str(row.get('PM Route','')).strip(), shift='Evening', company_id=user.company_id).first()
 
                 if student:
                     student.name = name
-                    student.branch = form_branch # 🚀 Force update branch
-                    student.company_id = user.company_id
-                    student.morning_route_id = am_r.id if am_r else student.morning_route_id
+                    student.branch = form_branch
+                    student.grade = row.get('Grade', student.grade)
+                    student.division = row.get('Div', student.division)
+                    # Update routes only if found in Excel
+                    if am_r: student.morning_route_id = am_r.id
+                    if noon_r: student.noon_route_id = noon_r.id
+                    if pm_r: student.evening_route_id = pm_r.id
                 else:
                     db.session.add(Student(
-                        name=name, 
-                        admission_no=adm_no, 
-                        branch=form_branch, # This is 'TESTONE' from Flutter
-                        company_id=user.company_id,
-                        grade=row.get('Grade', 'N/A'), 
-                        division=row.get('Div', 'A'),
+                        name=name, admission_no=adm_no, branch=form_branch, company_id=user.company_id,
+                        grade=row.get('Grade', 'N/A'), division=row.get('Div', 'A'),
                         morning_route_id=am_r.id if am_r else None,
                         noon_route_id=noon_r.id if noon_r else None,
                         evening_route_id=pm_r.id if pm_r else None
                     ))
                 count += 1
 
-        # 👩‍🏫 3. LADY ATTENDERS
+        # 👩‍🏫 3. ATTENDERS
         elif "attender" in raw_cat:
             for _, row in df.iterrows():
                 name = str(row.get('Attender Name') or '').strip()
@@ -1031,73 +1033,65 @@ def smart_bulk_upload():
                 attender = User.query.filter_by(contact_number=phone, company_id=user.company_id).first()
                 if not attender:
                     db.session.add(User(
-                        username=name, contact_number=phone, role='attender',
+                        name=name, username=phone, contact_number=phone, role='attender',
                         company_id=user.company_id, branch_id=form_branch,
                         password_hash=generate_password_hash("1234"),
                         license_info=str(row.get('Aadhar / ID Number', ''))
                     ))
                     count += 1
 
-        # 🛣️ 4. ROUTES
-        elif "route" in raw_cat:
-            for _, row in df.iterrows():
-                r_name = str(row.get('Route Name') or '').strip()
-                # Default to Morning if shift is missing
-                r_shift = str(row.get('Shift') or 'Morning').strip().capitalize() 
-                if not r_name: continue
-
-                exists = Route.query.filter_by(route_name=r_name, shift=r_shift, company_id=user.company_id).first()
-                if not exists:
-                    db.session.add(Route(route_name=r_name, shift=r_shift, company_id=user.company_id))
-                    count += 1
-
-# 🚌 5. BUSES (The Missing Link!)
+        # 🚌 4. BUSES
         elif "bus" in raw_cat:
             for _, row in df.iterrows():
                 b_no = str(row.get('Bus Number') or '').strip()
                 if not b_no: continue
 
-                # Look up Route IDs by their names from the Excel
                 am_r = Route.query.filter_by(route_name=str(row.get('Morning Route', '')).strip(), shift='Morning', company_id=user.company_id).first()
                 noon_r = Route.query.filter_by(route_name=str(row.get('Noon Route', '')).strip(), shift='Noon', company_id=user.company_id).first()
                 pm_r = Route.query.filter_by(route_name=str(row.get('Evening Route', '')).strip(), shift='Evening', company_id=user.company_id).first()
-                
-                # Look up Attender by Name
-                attender = User.query.filter_by(username=str(row.get('Lady Attender', '')).strip(), role='attender', company_id=user.company_id).first()
+                att = User.query.filter_by(username=str(row.get('Lady Attender', '')).strip(), role='attender', company_id=user.company_id).first()
 
                 bus = Bus.query.filter_by(bus_no=b_no, company_id=user.company_id).first()
-                
+                seater = int(safe_float(row.get('Seater Capacity'), 30))
+
                 if bus:
-                    # Update existing bus info
                     bus.branch = form_branch
-                    bus.morning_route_id = am_r.id if am_r else bus.morning_route_id
-                    bus.noon_route_id = noon_r.id if noon_r else bus.noon_route_id
-                    bus.evening_route_id = pm_r.id if pm_r else bus.evening_route_id
-                    bus.attender_id = attender.id if attender else bus.attender_id
-                    bus.seater_capacity = int(row.get('Seater Capacity', 30))
-                    bus.gps_device_id = str(row.get('GPS Device ID', ''))
+                    bus.seater_capacity = seater
+                    if am_r: bus.morning_route_id = am_r.id
+                    if noon_r: bus.noon_route_id = noon_r.id
+                    if pm_r: bus.evening_route_id = pm_r.id
+                    if att: bus.attender_id = att.id
                 else:
-                    # Create new bus
                     db.session.add(Bus(
-                        bus_no=b_no,
-                        company_id=user.company_id,
-                        branch=form_branch,
+                        bus_no=b_no, company_id=user.company_id, branch=form_branch,
                         morning_route_id=am_r.id if am_r else None,
                         noon_route_id=noon_r.id if noon_r else None,
                         evening_route_id=pm_r.id if pm_r else None,
-                        attender_id=attender.id if attender else None,
-                        seater_capacity=int(row.get('Seater Capacity', 30)),
-                        gps_device_id=str(row.get('GPS Device ID', '')),
-                        status='stopped'
+                        attender_id=att.id if att else None,
+                        seater_capacity=seater, status='stopped'
                     ))
                 count += 1
 
+        # 🛣️ 5. ROUTES
+        elif "route" in raw_cat:
+            for _, row in df.iterrows():
+                r_name = str(row.get('Route Name') or '').strip()
+                r_shift = str(row.get('Shift') or 'Morning').strip().capitalize() 
+                if not r_name: continue
+                if not Route.query.filter_by(route_name=r_name, shift=r_shift, company_id=user.company_id).first():
+                    db.session.add(Route(route_name=r_name, shift=r_shift, company_id=user.company_id))
+                    count += 1
+
+        if count == 0:
+            return jsonify({"error": f"No valid rows found for category: {raw_cat}"}), 400
+
         db.session.commit()
-        return jsonify({"message": f"Uploaded {count} {raw_cat} records successfully"}), 201
+        print(f"✅ Success: {count} {raw_cat} records synced for {form_branch}")
+        return jsonify({"message": f"Successfully uploaded {count} records"}), 201
 
     except Exception as e:
         db.session.rollback()
-        print(f"❌ BULK UPLOAD ERROR: {str(e)}")
+        print(f"❌ BULK UPLOAD CRITICAL ERROR: {str(e)}")
         return jsonify({"error": str(e)}), 500
     
 # ==========================================
