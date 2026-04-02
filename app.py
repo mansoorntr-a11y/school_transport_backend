@@ -968,25 +968,38 @@ def smart_bulk_upload():
         df.columns = df.columns.str.strip() # Remove accidental spaces in headers
         count = 0
 
-        # 📍 1. BUS STOPS
+        # 📍 1. BUS STOPS (Hardened with Trace Logging)
         if "stop" in raw_cat:
-            for _, row in df.iterrows():
-                stop_name = str(row.get('Stop Name') or '').strip()
-                if not stop_name: continue
+            print(f"📡 BULK STOP START: Branch={form_branch} | CoID={user.company_id}")
+            for index, row in df.iterrows():
+                # Clean Stop Name
+                name_raw = row.get('Stop Name')
+                stop_name = str(name_raw).strip() if name_raw and not pd.isna(name_raw) else None
+                if not stop_name or stop_name.lower() == 'nan': continue
                 
+                # Clean Data
+                z_name = str(row.get('Zone') or 'General').strip()
                 km_val = safe_float(row.get('Distance (KM)'))
                 lat_val = safe_float(row.get('Latitude'))
                 lng_val = safe_float(row.get('Longitude'))
-                z_name = str(row.get('Zone') or 'General').strip()
-                
-                stop = Stop.query.filter_by(stop_name=stop_name, branch=form_branch, company_id=user.company_id).first()
+
+                # 🔍 Check if stop exists (Matching EXACTLY by name, branch, and company)
+                stop = Stop.query.filter_by(
+                    stop_name=stop_name, 
+                    branch=form_branch, 
+                    company_id=user.company_id
+                ).first()
                 
                 if stop:
+                    print(f"🔄 Row {index}: UPDATING {stop_name}")
                     stop.km, stop.latitude, stop.longitude, stop.zone = km_val, lat_val, lng_val, z_name
+                    stop.branch = form_branch # 🚀 Ensure branch is forced to the current one
                 else:
+                    print(f"✨ Row {index}: CREATING NEW {stop_name}")
                     db.session.add(Stop(
                         stop_name=stop_name, zone=z_name, branch=form_branch, 
-                        company_id=user.company_id, km=km_val, latitude=lat_val, longitude=lng_val
+                        company_id=user.company_id, km=km_val, 
+                        latitude=lat_val, longitude=lng_val
                     ))
                 count += 1
 
@@ -1134,12 +1147,11 @@ def update_hardware_gps():
     # 4. If ID doesn't match anything in your Excel/DB
     print(f"⚠️ GPS ALERT: Unknown Device ID [{device_id}] sent data.")
     return jsonify({"error": f"Device {device_id} not registered"}), 404
-
 # ==========================================
-# 📍 SECURE STOPS MANAGEMENT (SaaS)
+# 📍 SECURE STOPS MANAGEMENT (Hardened SaaS)
 # ==========================================
 @app.route('/api/stops', methods=['GET', 'POST', 'OPTIONS'])
-@app.route('/api/stops/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS']) # 👈 Added PUT here
+@app.route('/api/stops/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @jwt_required()
 def handle_stops_master(id=None):
     if request.method == 'OPTIONS': 
@@ -1152,28 +1164,19 @@ def handle_stops_master(id=None):
     target_cid = get_safe_id(raw_cid)
     final_cid = target_cid if (user.role == 'super_admin' and target_cid) else user.company_id
 
-    # 📂 FETCH STOPS (GET) - Fixed for Parent View
+    # 📂 FETCH STOPS (GET)
     if request.method == 'GET':
         from sqlalchemy import func
         query = Stop.query.filter_by(company_id=final_cid)
         
-        # 🚀 1. Get the branch name from the URL (?branch=testone)
+        # 🚀 THE FIX: Read branch from URL and clean it
         target_branch = request.args.get('branch', '').strip().upper()
 
-        # 🛡️ 2. SMART SECURITY LOGIC
-        if user.role.lower() == 'branch_incharge':
-            # 🔒 Branch Incharges stay locked to their specific assigned branch name
-            search_val = (user.branch_id or "").strip()
-            search_branch = search_val.upper()
-            if search_val.isdigit():
-                branch_obj = db.session.get(Branch, int(search_val))
-                if branch_obj: search_branch = branch_obj.name.upper()
-            
-            query = query.filter(func.upper(func.trim(Stop.branch)) == search_branch)
-            print(f"🔒 Staff Security: Locked to {search_branch}")
+        if target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
+            # 🛡️ USE ILIKE or UPPER for case-insensitive matching
+            query = query.filter(func.upper(Stop.branch) == target_branch)
 
         elif target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
-            # 🔓 Admins / Super Admins only filter if they picked a specific branch
             query = query.filter(func.upper(func.trim(Stop.branch)) == target_branch)
             print(f"🔓 Admin Filter: Showing {target_branch}")
 
@@ -1192,7 +1195,6 @@ def handle_stops_master(id=None):
                 zone=data.get('zone'), 
                 km=float(data.get('km', 0.0)),
                 company_id=final_cid,
-                # 🔗 Link the ID so auto-fee-calculation works!
                 fee_zone_id=data.get('fee_zone_id') 
             )
             db.session.add(new_stop)
@@ -1204,26 +1206,36 @@ def handle_stops_master(id=None):
 
     # 📝 UPDATE STOP (PUT)
     if request.method == 'PUT':
-        stop = Stop.query.get(id)
+        stop = db.session.get(Stop, id) # Use db.session.get for modern SQLAlchemy
         if not stop: return jsonify({'error': 'Not found'}), 404
+        
+        # 🛡️ Security Check
         if user.role != 'super_admin' and stop.company_id != user.company_id:
             return jsonify({'error': 'Unauthorized'}), 403
 
         data = request.json
-        stop.stop_name = data.get('stop_name', stop.stop_name)
-        stop.km = float(data.get('km', stop.km))
-        stop.zone = data.get('zone', stop.zone)
-        stop.fee_zone_id = data.get('fee_zone_id', stop.fee_zone_id)
-        
-        db.session.commit()
-        return jsonify(stop.to_dict()), 200
+        try:
+            stop.stop_name = data.get('stop_name', stop.stop_name)
+            stop.km = float(data.get('km', stop.km))
+            stop.zone = data.get('zone', stop.zone)
+            stop.fee_zone_id = data.get('fee_zone_id', stop.fee_zone_id)
+            
+            # 🚀 THE FIX: Allow updating coordinates!
+            if 'latitude' in data: stop.latitude = float(data['latitude'])
+            if 'longitude' in data: stop.longitude = float(data['longitude'])
+            if 'branch' in data: stop.branch = str(data['branch']).upper()
+
+            db.session.commit()
+            return jsonify(stop.to_dict()), 200
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({'error': f"Update failed: {str(e)}"}), 500
 
     # 🗑️ DELETE STOP (DELETE)
     if request.method == 'DELETE':
-        stop = Stop.query.get(id)
+        stop = db.session.get(Stop, id)
         if not stop: return jsonify({'error': 'Stop not found'}), 404
         
-        # Security: Only owner or Super Admin
         if user.role != 'super_admin' and stop.company_id != user.company_id:
             return jsonify({'error': 'Unauthorized'}), 403
 
@@ -1590,8 +1602,21 @@ def unified_download_excel(data_type):
         elif clean_type == 'stops':
             columns = ['Stop Name', 'Zone', 'Distance (KM)', 'Latitude', 'Longitude']
             if not is_template:
-                recs = Stop.query.filter_by(company_id=user.company_id).all()
-                data = [{'Stop Name': s.stop_name, 'Zone': s.zone, 'Distance (KM)': s.km} for s in recs]
+                # 🛡️ Added Branch Filter (so you don't download every branch at once)
+                query = Stop.query.filter_by(company_id=user.company_id)
+                if target_branch != "ALL" and target_branch != "ALL BRANCHES":
+                    query = query.filter(db.func.upper(Stop.branch) == target_branch)
+                
+                recs = query.all()
+                
+                # 🚀 THE FIX: Added Latitude and Longitude to the mapping below
+                data = [{
+                    'Stop Name': s.stop_name, 
+                    'Zone': s.zone, 
+                    'Distance (KM)': s.km,
+                    'Latitude': s.latitude,   # 👈 WAS MISSING
+                    'Longitude': s.longitude  # 👈 WAS MISSING
+                } for s in recs]
 
         # 🛑 SAFETY CHECK: If clean_type matched nothing
         else:
