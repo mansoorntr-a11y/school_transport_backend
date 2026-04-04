@@ -812,27 +812,20 @@ def handle_admin_buses():
 
     # 📂 1. FETCH BUSES (GET)
     if request.method == 'GET':
-        query = Bus.query
+        query = Bus.query.filter_by(company_id=final_cid)
         
-        # 🛡️ God View Logic
-        if not is_super or final_cid:
-            query = query.filter_by(company_id=final_cid)
-        
+        # 🚀 THE FIX: Get the branch from the URL (Flutter sends this)
         target_branch = request.args.get('branch', '').strip().lower()
 
-        # 🚀 Smart Filter (Role-Based)
-        if user.role.lower() == 'branch_incharge':
-            # Branch incharges are strictly locked to their ID or Name
-            search_val = (user.branch_id or "").strip().lower()
-            query = query.filter(func.lower(func.trim(Bus.branch)) == search_val)
-            
-        elif target_branch and target_branch not in ["all", "all branches", "null", ""]:
-            # Admins/SuperAdmins filtering by selected branch
+        # If Incharge, we default to their profile branch if URL is empty
+        if user.role.lower() == 'branch_incharge' and not target_branch:
+            target_branch = (user.branch_id or "").strip().lower()
+
+        # Apply the filter if we have a branch name
+        if target_branch and target_branch not in ["all", "all branches", "null", ""]:
             query = query.filter(func.lower(func.trim(Bus.branch)) == target_branch)
 
         buses = query.all()
-        
-        # 🛠️ Enrich data with Route and Attender names
         results = []
         for b in buses:
             bus_data = b.to_dict()
@@ -850,10 +843,12 @@ def handle_admin_buses():
     if request.method == 'POST':
         data = request.json
         try:
+            # 🚀 THE FIX: Added 'chassis_no' and improved branch detection
             new_bus = Bus(
                 bus_no=data.get('bus_number'), 
+                chassis_no=data.get('chassis_no'), # 👈 This was missing!
                 company_id=final_cid,
-                branch=str(data.get('branch', user.branch_id)).upper().strip(),
+                branch=str(data.get('branch') or user.branch_id or 'TESTONE').upper().strip(),
                 morning_route_id=data.get('morning_route_id'),
                 noon_route_id=data.get('noon_route_id'),
                 evening_route_id=data.get('evening_route_id'),
@@ -894,6 +889,7 @@ def handle_bus_item(bus_id):
         bus.bus_no = data.get('bus_number', bus.bus_no)
         bus.chassis_no = data.get('chassis_no', bus.chassis_no)
         bus.seater_capacity = data.get('seater_capacity', bus.seater_capacity)
+        bus.branch = str(data.get('branch', bus.branch)).upper().strip()
         
         # 🛣️ Update 3-Shift Routes
         bus.morning_route_id = data.get('morning_route_id')
