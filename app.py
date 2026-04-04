@@ -1422,6 +1422,9 @@ def get_fleet_locations():
 # ==========================================
 # 👩‍🏫 LADY ATTENDER MANAGEMENT (SaaS)
 # ==========================================
+# ==========================================
+# 👩‍🏫 LADY ATTENDER MANAGEMENT (SaaS)
+# ==========================================
 @app.route('/api/admin/attenders', methods=['GET', 'POST', 'OPTIONS'])
 @jwt_required()
 def handle_admin_attenders():
@@ -1431,58 +1434,66 @@ def handle_admin_attenders():
     user = db.session.get(User, int(get_jwt_identity()))
     is_super = user.role.lower() == 'super_admin'
     
-    # 🏢 Determine the School ID (SaaS Isolation)
+    # 🏢 1. PROTECT AGAINST NULL COMPANY_ID
     raw_cid = request.args.get('company_id')
-    final_cid = get_safe_id(raw_cid) if is_super else user.company_id
+    # If Flutter sends 'null' string, or nothing, use the user's actual company_id
+    if not raw_cid or raw_cid == 'null':
+        final_cid = user.company_id
+    else:
+        final_cid = get_safe_id(raw_cid) if is_super else user.company_id
 
-    # 📂 1. FETCH ATTENDERS (GET)
+    # 📂 2. FETCH ATTENDERS (GET)
     if request.method == 'GET':
         from sqlalchemy import func
+        # We filter by company and role
         query = User.query.filter_by(company_id=final_cid, role='attender')
         
-        # Get branch name from Flutter (e.g., 'TESTTWO')
+        # Get branch from Flutter URL (e.g., 'TESTONE')
         target_branch = request.args.get('branch', '').strip().upper()
 
         # 🛡️ SMART FILTERING
-        if user.role.lower() == 'branch_incharge':
-            # 🔒 Branch Incharges only see their own branch
-            search_val = (user.branch_id or "").strip().upper()
-            query = query.filter(func.upper(User.branch_id) == search_val)
+        # If the URL has a branch, we use it. If not and you are an incharge, use your profile.
+        if not target_branch and user.role.lower() == 'branch_incharge':
+            target_branch = (user.branch_id or "").strip().upper()
         
-        elif target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
-            # 🔓 Admins filter by selected branch
-            query = query.filter(func.upper(User.branch_id) == target_branch)
-            print(f"🕵️‍♂️ Admin Filtering Attenders for: {target_branch}")
+        if target_branch and target_branch not in ["ALL", "ALL BRANCHES", ""]:
+            # 🚀 THE FIX: We check 'branch_id' column for the name 'TESTONE'
+            query = query.filter(func.upper(func.trim(User.branch_id)) == target_branch)
+            print(f"🕵️‍♂️ Fetching Attenders for School {final_cid} | Branch: {target_branch}")
 
         attenders = query.all()
+        
+        # 🛠️ If the list is empty, let's print a debug message to the Render logs
+        if not attenders:
+            print(f"⚠️ No attenders found for CoID: {final_cid}, Branch: {target_branch}")
+            
         return jsonify([u.to_dict() for u in attenders]), 200
 
-    # ➕ 2. ADD ATTENDER (POST)
+    # ➕ 3. ADD ATTENDER (POST)
     if request.method == 'POST':
         data = request.json
         phone_as_username = data.get('phone') 
-        real_name = data.get('username') # This is "Shilpa" from Flutter
+        real_name = data.get('username') 
         branch_from_flutter = data.get('branch', '').strip().upper()
         
-        # 🛡️ 1. Determine assigned_branch
+        # Role-based branch assignment
         if user.role.lower() == 'branch_incharge':
-            assigned_branch = (user.branch_id or "").strip().upper()
+            assigned_branch = (user.branch_id or "TESTONE").strip().upper()
         else:
-            assigned_branch = "MAIN" if branch_from_flutter in ["ALL", "ALL BRANCHES", ""] else branch_from_flutter
+            assigned_branch = branch_from_flutter if branch_from_flutter else "TESTONE"
 
         try:
-            # 🛡️ 2. Unique Check
             existing_user = User.query.filter_by(username=phone_as_username).first()
             if existing_user:
-                return jsonify({"error": f"Phone number {phone_as_username} is already registered."}), 400
+                return jsonify({"error": f"Phone {phone_as_username} already exists."}), 400
 
             new_attender = User(
                 username=phone_as_username, 
-                name=real_name,             # 👈 SAVE THE REAL NAME HERE
-                password_hash=generate_password_hash(data.get('password', '1234')),
+                name=real_name,
+                password_hash=generate_password_hash('1234'),
                 role='attender',
                 company_id=final_cid,
-                branch_id=assigned_branch, 
+                branch_id=assigned_branch, # 👈 This stores 'TESTONE'
                 contact_number=data.get('phone'),
                 license_info=data.get('license_info')
             )
@@ -1492,12 +1503,7 @@ def handle_admin_attenders():
                 
         except Exception as e:
             db.session.rollback()
-            error_msg = str(e)
-            if "users.license_info" in error_msg:
-                clean_error = "This Aadhar/ID is already registered to another staff member."
-            else:
-                clean_error = "Database Error: " + error_msg
-            return jsonify({"error": clean_error}), 400
+            return jsonify({"error": str(e)}), 400
 
 # 📝 Update Attender (Fixes the 'phone' attribute error)
 @app.route('/api/admin/attenders/<int:id>', methods=['PUT', 'DELETE', 'OPTIONS'])
@@ -1513,18 +1519,20 @@ def handle_single_attender(id):
         db.session.commit()
         return jsonify({"message": "Staff deleted successfully"}), 200
 
-    # 📝 3. UPDATE ATTENDER (PUT)
+    # 📝 UPDATE ATTENDER (PUT)
     if request.method == 'PUT':
         attender = db.session.get(User, id)
         if not attender: return jsonify({'error': 'Not found'}), 404
         
         data = request.json
-        # 🚀 THE FIX: Update the name field during edits
-        # Inside your PUT logic for attenders:
-        attender.name = data.get('username', attender.name) # Now 'name' is a valid attribute!
+        attender.name = data.get('username', attender.name)
         attender.contact_number = data.get('phone', attender.contact_number)
         attender.license_info = data.get('license_info', attender.license_info)
-        attender.branch_id = data.get('branch', attender.branch_id).upper()
+        
+        # 🚀 THE FIX: Use branch_id to match the database column
+        new_branch = data.get('branch') or data.get('branch_id')
+        if new_branch:
+            attender.branch_id = new_branch.strip().upper()
 
         db.session.commit()
         return jsonify(attender.to_dict()), 200
